@@ -1,7 +1,7 @@
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
   # HuggingFace model ID for the backbone encoder
-  hf_id: "Couchbase/ettin-17m"
+  hf_id: "jhu-clsp/ettin-encoder-17m"
 
   # SAE dictionary size (latent vocabulary). Scale relative to backbone hidden_size;
   # 65536 ≈ 85× for a 768-dim model. Reduce if memory is tight.
