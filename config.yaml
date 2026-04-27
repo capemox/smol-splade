@@ -1,0 +1,83 @@
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  # HuggingFace model ID for the backbone encoder
+  hf_id: "Couchbase/ettin-17m"
+
+  # SAE dictionary size (latent vocabulary). Scale relative to backbone hidden_size;
+  # 65536 ≈ 85× for a 768-dim model. Reduce if memory is tight.
+  sae_width: 65536
+
+  # Top-k activations kept per token during SAE encoding
+  k: 8
+
+  # Auxiliary k for dead-neuron recovery (usually 2×k)
+  aux_k: 16
+
+  # Neuron is considered dead after this many tokens have passed without activation
+  dead_steps_threshold: 10_000_000
+
+  # Normalise backbone embeddings before SAE (centres + unit-scale).
+  # Requires an init run over ~8k docs to compute stats (auto if True).
+  normalize_input: false
+
+
+# ── SAE pretraining ───────────────────────────────────────────────────────────
+sae:
+  # HF corpus dataset (each record should have a "text" or "passage" field).
+  # Tevatron/msmarco-passage-corpus streams MS MARCO without downloading it all.
+  corpus_dataset: "Tevatron/msmarco-passage-corpus"
+  corpus_text_field: "text"        # field name containing the passage text
+
+  doc_max_length: 256              # token length for documents
+  batch_size: 64                   # documents per step
+  lr: 5.0e-5
+  warmup_steps: 10_000
+  max_steps: 160_000
+  weight_decay: 0.01
+  fp16: true
+  freeze_backbone: true            # only train SAE weights
+
+  rcst_coeff: 1.0                  # reconstruction loss weight
+  aux_coeff: 0.0625                # auxiliary (dead-neuron) loss weight
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "checkpoints/sae"
+
+
+# ── SPLADE finetuning ─────────────────────────────────────────────────────────
+splade:
+  # Checkpoint produced by the SAE pretraining stage
+  sae_checkpoint: "checkpoints/sae/sae_final.pt"
+
+  # --- Training data (choose one) ---
+  #
+  # Option A (default): Tevatron hard-negative pairs – no extra download needed.
+  #   Set distil_data_path to "" to use this.
+  train_dataset: "Tevatron/msmarco-passage"   # has query + pos + hard-neg texts
+  train_text_field: "query"
+
+  # Option B: ColBERTv2 distillation file with teacher scores.
+  #   Download: wget https://huggingface.co/colbert-ir/colbertv2.0_msmarco_64way/resolve/main/examples.json
+  #   Set distil_data_path to the local file path; set corpus_dataset above too.
+  distil_data_path: ""             # leave empty to use Tevatron dataset instead
+  queries_dataset: "Tevatron/msmarco-passage"  # only used with distil_data_path
+
+  nway: 8                          # positives + negatives per query
+  doc_max_length: 256
+  query_max_length: 32
+  batch_size: 32
+  lr: 2.0e-5
+  warmup_steps: 10_000
+  max_steps: 240_000
+  weight_decay: 0.01
+  fp16: true
+
+  # FLOPs regularisation coefficients (lambda_d * avg_doc_nnz + lambda_q * avg_qry_nnz)
+  lambda_d: 0.04
+  lambda_q: 0.06
+  flops_warmup_steps: 6_000        # ramp regularisation linearly from 0 over this many steps
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "checkpoints/splade"
