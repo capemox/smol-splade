@@ -158,17 +158,17 @@ class TopKSAE(nn.Module):
     # Post-step hooks (call after every optimiser step)
     # ------------------------------------------------------------------
 
-    def post_step(self):
-        """Normalise decoder and remove gradient component parallel to decoder columns.
-
-        Must be called *after* ``optimizer.step()`` and *before* ``optimizer.zero_grad()``
-        for the gradient removal, or right after the step for normalisation.
-        """
+    def remove_parallel_gradient(self):
+        """Remove the gradient component parallel to W_dec columns (call before optimizer.step)."""
         with torch.no_grad():
             if self.W_dec.grad is not None:
                 W_unit = F.normalize(self.W_dec.data, dim=-1)
                 parallel = (self.W_dec.grad * W_unit).sum(-1, keepdim=True)
                 self.W_dec.grad.sub_(parallel * W_unit)
+
+    def post_step(self):
+        """Normalise W_dec columns to unit norm (call after optimizer.step)."""
+        with torch.no_grad():
             self.W_dec.data = F.normalize(self.W_dec.data, dim=-1)
 
 
@@ -334,7 +334,8 @@ def splade_loss(
     # ── Retrieval loss ────────────────────────────────────────────────
     if teacher_scores is not None:
         # teacher_scores: [B, nway]
-        student = scores.reshape(B, nway)
+        # scores is [B, B*nway]; extract each query's own nway-block (diagonal)
+        student = scores.reshape(B, B, nway)[torch.arange(B, device=scores.device), torch.arange(B, device=scores.device)]
 
         kl_loss = nn.KLDivLoss(reduction="batchmean", log_target=True)(
             F.log_softmax(student, dim=-1),
