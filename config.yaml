@@ -28,8 +28,8 @@ sae:
   corpus_dataset: "Tevatron/msmarco-passage-corpus"
   corpus_text_field: "text"        # field name containing the passage text
 
-  doc_max_length: 256              # token length for documents
-  batch_size: 64                   # documents per step
+  doc_max_length: 128              # token length for documents
+  batch_size: 16                   # documents per step
   lr: 5.0e-5
   warmup_steps: 10_000
   max_steps: 160_000
@@ -63,10 +63,10 @@ splade:
   distil_data_path: ""             # leave empty to use Tevatron dataset instead
   queries_dataset: "Tevatron/msmarco-passage"  # only used with distil_data_path
 
-  nway: 8                          # positives + negatives per query
-  doc_max_length: 256
+  nway: 4                          # positives + negatives per query
+  doc_max_length: 128
   query_max_length: 32
-  batch_size: 32
+  batch_size: 8
   lr: 2.0e-5
   warmup_steps: 10_000
   max_steps: 240_000
