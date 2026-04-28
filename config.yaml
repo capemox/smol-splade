@@ -81,3 +81,13 @@ splade:
   log_every: 200
   save_every: 10_000
   output_dir: "checkpoints/splade"
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  # NanoBEIR datasets to evaluate on (zeta-alpha-ai collection, ~50 queries each)
+  # Runs once before training starts, then after every save_every steps.
+  datasets:
+    - "zeta-alpha-ai/NanoMSMARCO"     # in-domain sanity check
+    - "zeta-alpha-ai/NanoNFCorpus"    # out-of-domain generalisation
+  batch_size: 32                       # encoding batch size for eval

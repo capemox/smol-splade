@@ -181,6 +181,7 @@ def train_splade(cfg: dict, resume: str | None = None):
     from torch.utils.tensorboard import SummaryWriter
 
     from model import TopKSAE, SAESPLADEModel, splade_loss
+    from eval import evaluate_nanobeir
     from data import (
         TevatronMSMARCODataset,
         ColBERTDistillationDataset,
@@ -260,6 +261,11 @@ def train_splade(cfg: dict, resume: str | None = None):
     writer = SummaryWriter(out_dir / "tensorboard")
     batches = data_iter()
 
+    # ── Initial evaluation (step 0) ───────────────────────────────────
+    if cfg.get("eval", {}).get("datasets"):
+        print("[SPLADE] Initial eval …")
+        evaluate_nanobeir(model, tokenizer, cfg, device, writer=writer, step=0)
+
     # ── Training loop ─────────────────────────────────────────────────
     model.train()
     t0 = time.time()
@@ -279,6 +285,9 @@ def train_splade(cfg: dict, resume: str | None = None):
             )
 
         scaler.scale(loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        model.sae.remove_parallel_gradient()
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -301,6 +310,9 @@ def train_splade(cfg: dict, resume: str | None = None):
 
         if (step + 1) % sp["save_every"] == 0:
             _save_splade(model, optimizer, scheduler, step + 1, out_dir / f"step_{step+1}.pt")
+            if cfg.get("eval", {}).get("datasets"):
+                print(f"[SPLADE] Eval at step {step+1} …")
+                evaluate_nanobeir(model, tokenizer, cfg, device, writer=writer, step=step + 1)
 
     _save_splade(model, optimizer, scheduler, sp["max_steps"], out_dir / "splade_final.pt")
     print(f"SPLADE finetuning complete. Saved to {out_dir / 'splade_final.pt'}")

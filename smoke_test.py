@@ -211,6 +211,75 @@ def test_full_splade_step():
     print(f"  [PASS] Full SPLADE training loop (3 steps) — final loss={metrics['loss']:.4f}")
 
 
+# ── Test 7: evaluate_nanobeir with fake model + fake data ────────────────────
+
+def test_eval():
+    from eval import _ndcg_at_k, evaluate_nanobeir
+    from unittest.mock import MagicMock, patch
+
+    # Test NDCG@10 computation
+    qrels = {"q1": {"d1": 1, "d2": 0}, "q2": {"d3": 1}}
+    ranked = [["d1", "d3", "d2"], ["d3", "d1", "d2"]]
+    query_ids = ["q1", "q2"]
+    ndcg = _ndcg_at_k(ranked, qrels, query_ids, k=10)
+    assert 0.0 < ndcg <= 1.0, f"NDCG out of range: {ndcg}"
+    assert abs(ndcg - 1.0) < 1e-6, f"Expected perfect NDCG=1.0, got {ndcg}"
+    print(f"  [PASS] NDCG@10 computation — NDCG={ndcg:.4f}")
+
+    # Test evaluate_nanobeir end-to-end with fake data
+    sae = TopKSAE(HIDDEN, SAE_WIDTH, K, AUX_K)
+    model = SAESPLADEModel.__new__(SAESPLADEModel)
+    torch.nn.Module.__init__(model)
+    model.backbone = FakeBackbone()
+    model.sae = sae
+    model.scale = True
+    model.alpha = torch.nn.Parameter(torch.ones(1))
+
+    fake_corpus = [{"_id": f"d{i}", "text": f"doc {i}"} for i in range(10)]
+    fake_queries = [{"_id": f"q{i}", "text": f"query {i}"} for i in range(3)]
+    fake_qrels = [{"query_id": "q0", "doc_id": "d0", "score": 1},
+                  {"query_id": "q1", "doc_id": "d1", "score": 1}]
+
+    def fake_load_dataset(name, split=None):
+        from torch.utils.data import Dataset
+        class FakeDS(list):
+            def __getitem__(self, key):
+                if isinstance(key, str):
+                    return [row[key] for row in list.__iter__(self)]
+                return list.__getitem__(self, key)
+            def __iter__(self):
+                return list.__iter__(self)
+        if split == "corpus":  return FakeDS(fake_corpus)
+        if split == "queries": return FakeDS(fake_queries)
+        if split == "qrels":   return FakeDS(fake_qrels)
+
+    fake_tokenizer = MagicMock()
+    fake_tokenizer.return_value = {
+        "input_ids": torch.randint(0, 100, (3, 8)),
+        "attention_mask": torch.ones(3, 8, dtype=torch.long),
+    }
+    fake_tokenizer.side_effect = lambda texts, **kw: {
+        "input_ids": torch.randint(0, 100, (len(texts), 8)),
+        "attention_mask": torch.ones(len(texts), 8, dtype=torch.long),
+    }
+
+    cfg = {"splade": {"doc_max_length": 8, "query_max_length": 8},
+           "eval": {"datasets": ["fake/dataset"], "batch_size": 4}}
+
+    with patch("eval.load_nanobeir") as mock_load:
+        mock_load.return_value = (
+            [r["_id"] for r in fake_corpus],
+            [r["text"] for r in fake_corpus],
+            [r["_id"] for r in fake_queries],
+            [r["text"] for r in fake_queries],
+            {"q0": {"d0": 1}, "q1": {"d1": 1}},
+        )
+        results = evaluate_nanobeir(model, fake_tokenizer, cfg, DEVICE)
+
+    assert "fake/dataset".split("/")[-1] in results, "dataset not in results"
+    print(f"  [PASS] evaluate_nanobeir end-to-end — NDCG@10={list(results.values())[0]:.4f}")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 TESTS = [
@@ -220,6 +289,7 @@ TESTS = [
     ("SAESPLADEModel + splade_loss", test_splade_model),
     ("Full SAE training step", test_full_sae_step),
     ("Full SPLADE training step", test_full_splade_step),
+    ("evaluate_nanobeir", test_eval),
 ]
 
 if __name__ == "__main__":
