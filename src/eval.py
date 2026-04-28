@@ -11,9 +11,9 @@ def load_nanobeir(dataset_name: str):
     """Load corpus, queries, qrels from a zeta-alpha-ai/Nano* dataset."""
     from datasets import load_dataset
 
-    corpus_ds = load_dataset(dataset_name, split="corpus")
-    query_ds = load_dataset(dataset_name, split="queries")
-    qrels_ds = load_dataset(dataset_name, split="qrels")
+    corpus_ds = load_dataset(dataset_name, "corpus", split="train")
+    query_ds = load_dataset(dataset_name, "queries", split="train")
+    qrels_ds = load_dataset(dataset_name, "qrels", split="train")
 
     corpus_ids = [str(x) for x in corpus_ds["_id"]]
     corpus_texts = [t or "" for t in corpus_ds["text"]]
@@ -25,9 +25,8 @@ def load_nanobeir(dataset_name: str):
     for row in qrels_ds:
         qid = str(row.get("query_id") or row.get("query-id", ""))
         did = str(row.get("doc_id") or row.get("corpus-id") or row.get("corpus_id", ""))
-        score = int(row.get("score") or row.get("relevance") or 0)
-        if score > 0:
-            qrels.setdefault(qid, {})[did] = score
+        score = int(row.get("score") or row.get("relevance") or 1)  # implicit 1 if no score column
+        qrels.setdefault(qid, {})[did] = score
 
     return corpus_ids, corpus_texts, query_ids, query_texts, qrels
 
