@@ -815,7 +815,7 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
     from torch.utils.tensorboard import SummaryWriter
     from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE, vocab_transplant_splade_loss
+    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE, vocab_transplant_splade_loss, projected_alignment_loss
     from eval import evaluate_asymmetric
     from data import (
         ColBERTDistillationDataset,
@@ -823,6 +823,7 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
         build_corpus_lookup,
         build_query_lookup,
         collate_asymmetric_batch,
+        make_alignment_loader,
     )
 
     vc = cfg["vocab_transplant"]
@@ -922,6 +923,48 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
     batches = data_iter()
+
+    # ── Phase 1: cosine alignment warmup ──────────────────────────────
+    alignment_steps = vc.get("alignment_steps", 0)
+    if alignment_steps > 0 and start_step == 0:
+        print(f"[VT] Phase 1: Cosine alignment warm-up ({alignment_steps} steps) …")
+        align_optimizer = torch.optim.AdamW(
+            query_model.parameters(), lr=vc.get("alignment_lr", 1e-3), weight_decay=vc["weight_decay"]
+        )
+        align_loader = make_alignment_loader(
+            cfg["sae"]["corpus_dataset"],
+            cfg["sae"].get("corpus_text_field", "text"),
+            query_tokenizer,
+            vc["batch_size"],
+            vc["doc_max_length"],
+            device,
+        )
+        query_model.train()
+        t0 = time.time()
+        for astep in range(alignment_steps):
+            a_ids, a_mask, texts = next(align_loader)
+            align_optimizer.zero_grad()
+            with autocast(enabled=vc["fp16"] and device.type == "cuda"):
+                align_loss = projected_alignment_loss(
+                    query_model, doc_splade, a_ids, a_mask, texts, vc["doc_max_length"]
+                )
+            scaler.scale(align_loss).backward()
+            if scaler.is_enabled():
+                scaler.unscale_(align_optimizer)
+            torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
+            scaler.step(align_optimizer)
+            scaler.update()
+
+            if (astep + 1) % vc["log_every"] == 0:
+                elapsed = time.time() - t0
+                print(
+                    f"[VT-align] step {astep+1:>6} | align_loss {align_loss.item():.4f} | {elapsed:.0f}s"
+                )
+                writer.add_scalar("vocab_transplant/align_loss", align_loss.item(), astep + 1)
+                t0 = time.time()
+
+        del align_optimizer, align_loader
+        print("[VT] Phase 1 complete.")
 
     # ── Initial eval ──────────────────────────────────────────────────
     if cfg.get("eval", {}).get("datasets"):

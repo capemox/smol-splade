@@ -209,18 +209,21 @@ vocab_transplant:
   weight_decay: 0.01
   fp16: true
 
-  lambda_q: 0.1
+  lambda_q: 0.05
   flops_warmup_steps: 50_000   # long ramp: let retrieval quality establish before full sparsification
 
+  # Phase 1: cosine alignment warmup
+  # Trains query encoder with cosine similarity loss against doc SPLADE on corpus texts.
+  # Bootstraps representation alignment before ranking fine-tuning begins.
+  alignment_steps: 10_000
+  alignment_lr: 1.0e-3
+
   # LoRA on the frozen doc encoder (optional).
-  # After lora_warmup_steps the doc encoder gets lightweight LoRA adapters and
-  # both encoders update jointly for the remainder of training.
-  # The LoRA adapter is saved as lora_doc_step_N/ alongside query checkpoints.
-  lora_doc_encoder: true
+  lora_doc_encoder: false
   lora_r: 8
   lora_alpha: 16
   lora_dropout: 0.1
-  lora_warmup_steps: 10_000    # steps with frozen doc before enabling LoRA
+  lora_warmup_steps: 10_000
   lora_target_modules: ["query", "value"]   # BERT attention projections in naver/splade-v3
 
   log_every: 200
