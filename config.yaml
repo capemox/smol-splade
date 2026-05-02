@@ -1,24 +1,24 @@
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
   # HuggingFace model ID for the backbone encoder
-  hf_id: "jhu-clsp/ettin-encoder-17m"
+  hf_id: "jhu-clsp/ettin-encoder-68m"
 
   # SAE dictionary size (latent vocabulary). Scale relative to backbone hidden_size;
   # 65536 ≈ 85× for a 768-dim model. Reduce if memory is tight.
-  sae_width: 65536
+  sae_width: 30522  # matches naver/splade-v3 vocab; restore to 65536 after asymmetric SAE pretraining
 
   # Top-k activations kept per token during SAE encoding
-  k: 8
+  k: 32
 
   # Auxiliary k for dead-neuron recovery (usually 2×k)
-  aux_k: 16
+  aux_k: 64
 
   # Neuron is considered dead after this many tokens have passed without activation
   dead_steps_threshold: 10_000_000
 
   # Normalise backbone embeddings before SAE (centres + unit-scale).
   # Requires an init run over ~8k docs to compute stats (auto if True).
-  normalize_input: false
+  normalize_input: true
 
 
 # ── SAE pretraining ───────────────────────────────────────────────────────────
@@ -38,17 +38,17 @@ sae:
   freeze_backbone: true            # only train SAE weights
 
   rcst_coeff: 1.0                  # reconstruction loss weight
-  aux_coeff: 0.0625                # auxiliary (dead-neuron) loss weight
+  aux_coeff: 0.5                   # auxiliary (dead-neuron) loss weight
 
   log_every: 200
   save_every: 10_000
-  output_dir: "checkpoints/sae"
+  output_dir: "checkpoints/sae_asymmetric"
 
 
 # ── SPLADE finetuning ─────────────────────────────────────────────────────────
 splade:
   # Checkpoint produced by the SAE pretraining stage
-  sae_checkpoint: "checkpoints/sae/sae_final.pt"
+  sae_checkpoint: "checkpoints/sae_asymmetric/sae_final.pt"
 
   # --- Training data (choose one) ---
   #
@@ -60,7 +60,7 @@ splade:
   # Option B: ColBERTv2 distillation file with teacher scores.
   #   Download: wget https://huggingface.co/colbert-ir/colbertv2.0_msmarco_64way/resolve/main/examples.json
   #   Set distil_data_path to the local file path; set corpus_dataset above too.
-  distil_data_path: ""             # leave empty to use Tevatron dataset instead
+  distil_data_path: "data/colbertv2_msmarco_64way.json"
   queries_dataset: "Tevatron/msmarco-passage"  # only used with distil_data_path
 
   nway: 4                          # positives + negatives per query
@@ -81,6 +81,151 @@ splade:
   log_every: 200
   save_every: 10_000
   output_dir: "checkpoints/splade"
+
+
+# ── Asymmetric finetuning ─────────────────────────────────────────────────────
+# Trains a lightweight SAE-SPLADE query encoder to work with a frozen doc SPLADE.
+# The doc encoder (e.g. naver/splade-v3) is never updated; only the query SAE is trained.
+#
+# IMPORTANT: the SAE for this stage must be pretrained with sae_width=30522
+# (the vocab size of naver/splade-v3, a DistilBERT-based model).
+# The regular SAE checkpoint uses sae_width=65536 and cannot be reused.
+#
+# Run SAE pretraining for asymmetric mode:
+#   uv run train.py sae --config config.yaml
+# but first temporarily set  model.sae_width: 30522  in this file,
+# then restore it after. The checkpoint will land in sae_asymmetric/ below.
+asymmetric:
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # SAE checkpoint pretrained with sae_width=30522 (matches naver/splade-v3 vocab)
+  sae_checkpoint: "checkpoints/sae_asymmetric/sae_final.pt"
+
+  # Training data — same options as SPLADE finetuning
+  distil_data_path: "data/colbertv2_msmarco_64way.json"
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  nway: 4
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+  lr: 2.0e-5
+  warmup_steps: 10_000
+  max_steps: 240_000
+  weight_decay: 0.01
+  fp16: true
+
+  lambda_q: 0.01                   # query FLOPs regularisation only (docs are frozen)
+  flops_warmup_steps: 40_000       # delay past k_anneal_steps so alignment happens before sparsification
+
+  # k-annealing: start dense so SAE latents can find alignment with doc vocab dims,
+  # then decay to model.k once overlap is established.
+  k_init: 256                      # starting k (high = denser overlap = usable gradients)
+  k_anneal_steps: 30_000           # steps to linearly decay k_init → model.k
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "checkpoints/asymmetric"
+
+
+# ── Projected query encoder ───────────────────────────────────────────────────
+# Trains a small backbone + linear projection + frozen MLM head from the doc SPLADE.
+# Both query and doc vectors are in the same vocabulary space → dot product is valid
+# regardless of which tokenizer the small backbone uses.
+#
+# Run: uv run train.py projected --config config.yaml
+projected:
+  # Small query backbone (can differ from model.hf_id)
+  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+
+  # Frozen doc SPLADE — also donates its MLM head to the query encoder
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # Phase 1: alignment warm-up
+  # Trains only the projection layer with MSE loss: query_output ≈ doc_splade_output
+  # on the same corpus texts. Set to 0 to skip (not recommended).
+  alignment_steps: 10_000
+  alignment_lr: 1.0e-3     # higher LR is fine — only the small projection is updated
+
+  # Training data (same options as splade/asymmetric)
+  distil_data_path: "data/colbertv2_msmarco_64way.json"
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  nway: 4
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+  lr: 2.0e-5
+  warmup_steps: 5_000
+  max_steps: 200_000
+  weight_decay: 0.01
+  fp16: true
+
+  lambda_q: 0.04
+  flops_warmup_steps: 10_000   # short ramp: projection already aligned, sparsity can kick in early
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "checkpoints/projected"
+
+
+# ── Vocab-transplant query encoder ───────────────────────────────────────────
+# Uses tokensurgeon-style embedding transfer to retarget a small MLM encoder
+# (e.g. ettin-17m) from its native vocabulary onto the doc SPLADE's vocabulary.
+# After transplant the query encoder shares the doc encoder's tokenizer and
+# vocabulary space, so their vectors can be dot-producted directly.
+#
+# The transplant is performed automatically at the start of training and cached
+# in transplant_dir; subsequent runs skip it if the directory already exists.
+#
+# The query model must support AutoModelForMaskedLM (i.e. have an MLM head).
+#
+# Run: uv run train.py vocab_transplant --config config.yaml
+vocab_transplant:
+  # Small query encoder — must be loadable as AutoModelForMaskedLM
+  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+
+  # Frozen doc SPLADE — also donates its tokenizer to the query encoder
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # Nearest-neighbour count for approximating donor-only tokens.
+  # Higher k → smoother interpolation; 64 is a good default.
+  tokensurgeon_k: 64
+
+  # Where to cache the transplanted model (skipped if already present)
+  transplant_dir: "checkpoints/transplanted_ettin"
+
+  # Training data (same options as splade/asymmetric/projected)
+  distil_data_path: "data/colbertv2_msmarco_64way.json"
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  nway: 4
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+  lr: 2.0e-5
+  warmup_steps: 10_000
+  max_steps: 200_000
+  weight_decay: 0.01
+  fp16: true
+
+  lambda_q: 0.1
+  flops_warmup_steps: 50_000   # long ramp: let retrieval quality establish before full sparsification
+
+  # LoRA on the frozen doc encoder (optional).
+  # After lora_warmup_steps the doc encoder gets lightweight LoRA adapters and
+  # both encoders update jointly for the remainder of training.
+  # The LoRA adapter is saved as lora_doc_step_N/ alongside query checkpoints.
+  lora_doc_encoder: true
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.1
+  lora_warmup_steps: 10_000    # steps with frozen doc before enabling LoRA
+  lora_target_modules: ["query", "value"]   # BERT attention projections in naver/splade-v3
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "checkpoints/vocab_transplant"
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ dependencies = [
     "tensorboard",
     "pyyaml",
     "numpy",
+    "peft>=0.19.1",
 ]
 
 [tool.uv]

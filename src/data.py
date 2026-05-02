@@ -209,8 +209,16 @@ class ColBERTDistillationDataset(IterableDataset):
 def build_corpus_lookup(corpus_dataset: str, text_field: str = "text") -> Dict[str, str]:
     """Load MS MARCO corpus into memory as ``{docid: text}``.
 
-    ~8.8 M passages, expect ~3-4 GB RAM.  Progress is printed every million docs.
+    ~8.8 M passages, expect ~3-4 GB RAM.  Result is pickled to disk so
+    subsequent runs load in seconds instead of re-streaming 8.8M records.
     """
+    import pickle
+    cache_path = Path("data") / (corpus_dataset.replace("/", "__") + ".pkl")
+    if cache_path.exists():
+        print(f"Loading corpus from cache {cache_path} ...")
+        with cache_path.open("rb") as f:
+            return pickle.load(f)
+
     from datasets import load_dataset
     print(f"Loading corpus from {corpus_dataset} into memory ...")
     corpus: Dict[str, str] = {}
@@ -222,6 +230,11 @@ def build_corpus_lookup(corpus_dataset: str, text_field: str = "text") -> Dict[s
         if (i + 1) % 1_000_000 == 0:
             print(f"  loaded {i+1:,} passages …")
     print(f"Corpus loaded: {len(corpus):,} passages")
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("wb") as f:
+        pickle.dump(corpus, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  Corpus cached → {cache_path}")
     return corpus
 
 
@@ -240,8 +253,88 @@ def build_query_lookup(queries_dataset: str) -> Dict[str, str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Alignment warm-up loader
+# ──────────────────────────────────────────────────────────────────────────────
+
+def make_alignment_loader(
+    dataset_name: str,
+    text_field: str,
+    tokenizer: AutoTokenizer,
+    batch_size: int,
+    max_length: int,
+    device: torch.device,
+) -> Iterator:
+    """Yields ``(input_ids, attention_mask, texts)`` triples for alignment warm-up.
+
+    Streams corpus text, tokenises with the query tokenizer, and also returns the
+    original strings so the doc SPLADE can tokenise them independently.
+    """
+    from datasets import load_dataset
+
+    def generate():
+        while True:
+            ds = load_dataset(dataset_name, split="train", streaming=True)
+            batch: List[str] = []
+            for item in ds:
+                text = item.get(text_field) or item.get("passage") or item.get("contents", "")
+                if not text:
+                    continue
+                batch.append(text)
+                if len(batch) == batch_size:
+                    enc = tokenizer(
+                        batch,
+                        max_length=max_length,
+                        truncation=True,
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                    yield enc["input_ids"].to(device), enc["attention_mask"].to(device), batch
+                    batch = []
+
+    return generate()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Batch collation for SPLADE
 # ──────────────────────────────────────────────────────────────────────────────
+
+def collate_asymmetric_batch(
+    items: List[Dict],
+    query_tokenizer: AutoTokenizer,
+    query_max_length: int,
+    device: torch.device,
+):
+    """Collate for asymmetric training: tokenise only queries; return doc texts as strings.
+
+    The doc texts are left un-tokenised so that :class:`FrozenDocSPLADE` can
+    handle them with its own tokenizer.
+
+    Returns:
+        q_ids, q_mask   — query token tensors ``[B, Lq]``
+        doc_texts       — flat list of passage strings ``[B * nway]``
+        teacher_scores  — ``[B, nway]`` float tensor or None
+    """
+    queries = [it["query"] for it in items]
+    doc_texts = [p.get("text", "") for it in items for p in it["passages"]]
+
+    q_enc = query_tokenizer(
+        queries,
+        max_length=query_max_length,
+        truncation=True,
+        padding=True,
+        return_tensors="pt",
+    )
+    q_ids = q_enc["input_ids"].to(device)
+    q_mask = q_enc["attention_mask"].to(device)
+
+    teacher_scores = None
+    if items[0]["teacher_scores"] is not None:
+        teacher_scores = torch.tensor(
+            [it["teacher_scores"] for it in items], dtype=torch.float32, device=device
+        )
+
+    return q_ids, q_mask, doc_texts, teacher_scores
+
 
 def collate_splade_batch(
     items: List[Dict],
