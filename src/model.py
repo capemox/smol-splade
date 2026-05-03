@@ -606,6 +606,54 @@ def vocab_transplant_splade_loss(
     }
 
 
+def vocab_transplant_joint_loss(
+    query_model: "VocabTransplantQuerySPLADE",
+    q_ids: torch.Tensor,
+    q_mask: torch.Tensor,
+    doc_vecs: torch.Tensor,
+    teacher_q_vecs: torch.Tensor,
+    lambda_q: float,
+    flops_scale: float,
+    align_coeff: float = 0.3,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Joint CE ranking + cosine alignment loss for vocab-transplant query encoder.
+
+    Replaces self-distillation KL, which fails because naver/splade-v3 is a doc
+    encoder and produces near-zero / near-uniform score distributions on short
+    query texts, giving the model no useful gradient to follow.
+
+    CE ranking:  cross-entropy over the [B, B*nway] query×doc score matrix;
+                 first doc per query is the positive, rest are in-batch hard negatives.
+    Alignment:   cosine similarity between query_model(query) and doc_splade(query).
+                 Anchors the query encoder to splade-v3's vocabulary space without
+                 requiring valid teacher score distributions.
+    FLOPS:       squared mean regularisation for sparsity.
+    """
+    B = q_ids.shape[0]
+    nway = doc_vecs.shape[0] // B
+
+    q_vecs = query_model.encode(q_ids, q_mask)  # [B, vocab_size]
+    scores = q_vecs @ doc_vecs.T                # [B, B*nway]
+
+    labels = torch.arange(B, device=q_ids.device) * nway
+    ranking_loss = F.cross_entropy(scores, labels)
+
+    # Cast teacher to match q_vecs dtype (fp32 outside autocast, fp16 inside).
+    align_loss = (1.0 - F.cosine_similarity(q_vecs, teacher_q_vecs.to(q_vecs.dtype))).mean()
+
+    flops = flops_scale * lambda_q * (q_vecs.mean(dim=0) ** 2).sum()
+    avg_q_nnz = (q_vecs > 0).float().mean(0).sum()
+
+    total = ranking_loss + align_coeff * align_loss + flops
+    return total, {
+        "loss": total.item(),
+        "ranking": ranking_loss.item(),
+        "align": align_loss.item(),
+        "flops": flops.item(),
+        "avg_q_nnz": avg_q_nnz.item(),
+    }
+
+
 def asymmetric_splade_loss(
     query_model: SAESPLADEModel,
     q_ids: torch.Tensor,

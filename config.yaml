@@ -42,13 +42,13 @@ sae:
 
   log_every: 200
   save_every: 10_000
-  output_dir: "checkpoints/sae_asymmetric"
+  output_dir: "sae_asymmetric"
 
 
 # ── SPLADE finetuning ─────────────────────────────────────────────────────────
 splade:
   # Checkpoint produced by the SAE pretraining stage
-  sae_checkpoint: "checkpoints/sae_asymmetric/sae_final.pt"
+  sae_checkpoint: "sae_asymmetric/sae_final.pt"
 
   # --- Training data (choose one) ---
   #
@@ -80,7 +80,7 @@ splade:
 
   log_every: 200
   save_every: 10_000
-  output_dir: "checkpoints/splade"
+  output_dir: "splade"
 
 
 # ── Asymmetric finetuning ─────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ asymmetric:
   doc_splade_hf_id: "naver/splade-v3"
 
   # SAE checkpoint pretrained with sae_width=30522 (matches naver/splade-v3 vocab)
-  sae_checkpoint: "checkpoints/sae_asymmetric/sae_final.pt"
+  sae_checkpoint: "sae_asymmetric/sae_final.pt"
 
   # Training data — same options as SPLADE finetuning
   distil_data_path: "data/colbertv2_msmarco_64way.json"
@@ -125,7 +125,7 @@ asymmetric:
 
   log_every: 200
   save_every: 10_000
-  output_dir: "checkpoints/asymmetric"
+  output_dir: "asymmetric"
 
 
 # ── Projected query encoder ───────────────────────────────────────────────────
@@ -136,7 +136,7 @@ asymmetric:
 # Run: uv run train.py projected --config config.yaml
 projected:
   # Small query backbone (can differ from model.hf_id)
-  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+  query_hf_id: "jhu-clsp/ettin-encoder-68m"
 
   # Frozen doc SPLADE — also donates its MLM head to the query encoder
   doc_splade_hf_id: "naver/splade-v3"
@@ -166,7 +166,7 @@ projected:
 
   log_every: 200
   save_every: 10_000
-  output_dir: "checkpoints/projected"
+  output_dir: "projected"
 
 
 # ── Vocab-transplant query encoder ───────────────────────────────────────────
@@ -183,7 +183,7 @@ projected:
 # Run: uv run train.py vocab_transplant --config config.yaml
 vocab_transplant:
   # Small query encoder — must be loadable as AutoModelForMaskedLM
-  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+  query_hf_id: "jhu-clsp/ettin-encoder-68m"
 
   # Frozen doc SPLADE — also donates its tokenizer to the query encoder
   doc_splade_hf_id: "naver/splade-v3"
@@ -193,7 +193,7 @@ vocab_transplant:
   tokensurgeon_k: 64
 
   # Where to cache the transplanted model (skipped if already present)
-  transplant_dir: "checkpoints/transplanted_ettin"
+  transplant_dir: "transplanted_ettin"
 
   # Training data (same options as splade/asymmetric/projected)
   distil_data_path: "data/colbertv2_msmarco_64way.json"
@@ -211,12 +211,13 @@ vocab_transplant:
 
   lambda_q: 0.05
   flops_warmup_steps: 50_000   # long ramp: let retrieval quality establish before full sparsification
+  align_coeff: 0.3             # weight of cosine alignment term relative to CE ranking loss
 
   # Phase 1: cosine alignment warmup
   # Trains query encoder with cosine similarity loss against doc SPLADE on corpus texts.
   # Bootstraps representation alignment before ranking fine-tuning begins.
-  alignment_steps: 10_000
-  alignment_lr: 1.0e-3
+  alignment_steps: 50_000
+  alignment_lr: 5.0e-4  # cosine-decays to 1e-5 over alignment_steps
 
   # LoRA on the frozen doc encoder (optional).
   lora_doc_encoder: false
@@ -228,7 +229,7 @@ vocab_transplant:
 
   log_every: 200
   save_every: 10_000
-  output_dir: "checkpoints/vocab_transplant"
+  output_dir: "vocab_transplant"
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────

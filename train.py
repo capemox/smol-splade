@@ -111,7 +111,7 @@ def train_sae(cfg: dict, resume: str | None = None):
         print(f"Resumed from step {start_step}")
 
     # ── Setup ─────────────────────────────────────────────────────────
-    out_dir = Path(sc["output_dir"])
+    out_dir = _model_ckpt_root(mc["hf_id"]) / sc["output_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
     data_iter = make_sae_loader(
@@ -207,7 +207,7 @@ def train_splade(cfg: dict, resume: str | None = None):
         dead_steps_threshold=mc["dead_steps_threshold"],
         normalize_input=mc["normalize_input"],
     )
-    ckpt_path = sp["sae_checkpoint"]
+    ckpt_path = _model_ckpt_root(mc["hf_id"]) / sp["sae_checkpoint"]
     print(f"Loading SAE from {ckpt_path} …")
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sae.load_state_dict(ckpt["sae"])
@@ -256,7 +256,7 @@ def train_splade(cfg: dict, resume: str | None = None):
         print(f"Resumed from step {start_step}")
 
     # ── Setup ─────────────────────────────────────────────────────────
-    out_dir = Path(sp["output_dir"])
+    out_dir = _model_ckpt_root(mc["hf_id"]) / sp["output_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
     batches = data_iter()
@@ -368,7 +368,7 @@ def train_asymmetric(cfg: dict, resume: str | None = None):
         dead_steps_threshold=mc["dead_steps_threshold"],
         normalize_input=mc["normalize_input"],
     )
-    ckpt_path = ac["sae_checkpoint"]
+    ckpt_path = _model_ckpt_root(mc["hf_id"]) / ac["sae_checkpoint"]
     print(f"Loading SAE checkpoint from {ckpt_path} …")
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sae.load_state_dict(ckpt["sae"])
@@ -417,7 +417,7 @@ def train_asymmetric(cfg: dict, resume: str | None = None):
         print(f"Resumed from step {start_step}")
 
     # ── Setup ─────────────────────────────────────────────────────────
-    out_dir = Path(ac["output_dir"])
+    out_dir = _model_ckpt_root(mc["hf_id"]) / ac["output_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
     batches = data_iter()
@@ -628,7 +628,7 @@ def train_projected(cfg, resume=None):
         start_step = ckpt["step"] + 1
         print(f"Resumed from step {start_step}")
 
-    out_dir = Path(pc["output_dir"])
+    out_dir = _model_ckpt_root(pc["query_hf_id"]) / pc["output_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
     batches = data_iter()
@@ -815,7 +815,7 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
     from torch.utils.tensorboard import SummaryWriter
     from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE, vocab_transplant_splade_loss, projected_alignment_loss
+    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE, vocab_transplant_joint_loss, projected_alignment_loss
     from eval import evaluate_asymmetric
     from data import (
         ColBERTDistillationDataset,
@@ -835,7 +835,7 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
     )
 
     # ── Step 1: vocab transplant ──────────────────────────────────────
-    transplant_dir = vc["transplant_dir"]
+    transplant_dir = str(_model_ckpt_root(vc["query_hf_id"]) / vc["transplant_dir"])
     if not Path(transplant_dir, "config.json").exists():
         _run_tokensurgeon(
             query_hf_id=vc["query_hf_id"],
@@ -898,9 +898,11 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
             for item in dataset:
                 buf.append(item)
                 if len(buf) == vc["batch_size"]:
-                    yield collate_asymmetric_batch(
+                    q_texts = [it["query"] for it in buf]
+                    q_ids, q_mask, doc_texts, _ = collate_asymmetric_batch(
                         buf, query_tokenizer, vc["query_max_length"], device
                     )
+                    yield q_ids, q_mask, q_texts, doc_texts
                     buf = []
 
     # ── Optimiser (full model trainable) ──────────────────────────────
@@ -919,7 +921,7 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
         start_step = ckpt["step"] + 1
         print(f"Resumed from step {start_step}")
 
-    out_dir = Path(vc["output_dir"])
+    out_dir = _model_ckpt_root(vc["query_hf_id"]) / vc["output_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
     batches = data_iter()
@@ -929,39 +931,65 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
     if alignment_steps > 0 and start_step == 0:
         print(f"[VT] Phase 1: Cosine alignment warm-up ({alignment_steps} steps) …")
         align_optimizer = torch.optim.AdamW(
-            query_model.parameters(), lr=vc.get("alignment_lr", 1e-3), weight_decay=vc["weight_decay"]
+            query_model.parameters(), lr=vc.get("alignment_lr", 5e-4), weight_decay=vc["weight_decay"]
         )
+        align_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            align_optimizer, T_max=alignment_steps, eta_min=1e-5
+        )
+        # Use training queries (not corpus passages) so alignment targets the actual
+        # query distribution the model will see at inference time.
         align_loader = make_alignment_loader(
-            cfg["sae"]["corpus_dataset"],
-            cfg["sae"].get("corpus_text_field", "text"),
+            vc.get("queries_dataset", "Tevatron/msmarco-passage"),
+            "query",
             query_tokenizer,
             vc["batch_size"],
-            vc["doc_max_length"],
+            vc["query_max_length"],
             device,
         )
         query_model.train()
         t0 = time.time()
+        import torch.nn.functional as _F
         for astep in range(alignment_steps):
             a_ids, a_mask, texts = next(align_loader)
             align_optimizer.zero_grad()
             with autocast(enabled=vc["fp16"] and device.type == "cuda"):
-                align_loss = projected_alignment_loss(
-                    query_model, doc_splade, a_ids, a_mask, texts, vc["doc_max_length"]
-                )
+                q_vecs = query_model.encode(a_ids, a_mask)
+                d_vecs = doc_splade.encode(texts, vc["query_max_length"], no_grad=True)
+                align_loss = (1.0 - _F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+            q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
             scaler.scale(align_loss).backward()
             if scaler.is_enabled():
                 scaler.unscale_(align_optimizer)
             torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
             scaler.step(align_optimizer)
             scaler.update()
+            align_scheduler.step()
 
             if (astep + 1) % vc["log_every"] == 0:
                 elapsed = time.time() - t0
+                align_lr = align_optimizer.param_groups[0]["lr"]
                 print(
-                    f"[VT-align] step {astep+1:>6} | align_loss {align_loss.item():.4f} | {elapsed:.0f}s"
+                    f"[VT-align] step {astep+1:>6} | align_loss {align_loss.item():.4f} | "
+                    f"q_nnz {q_nnz:.1f} | lr {align_lr:.2e} | {elapsed:.0f}s"
                 )
                 writer.add_scalar("vocab_transplant/align_loss", align_loss.item(), astep + 1)
+                writer.add_scalar("vocab_transplant/align_q_nnz", q_nnz, astep + 1)
+                writer.add_scalar("vocab_transplant/align_lr", align_lr, astep + 1)
                 t0 = time.time()
+
+            if (astep + 1) % vc["save_every"] == 0:
+                align_ckpt = out_dir / f"align_step_{astep+1}.pt"
+                torch.save({"model": query_model.state_dict(), "step": astep + 1}, align_ckpt)
+                print(f"  Saved alignment checkpoint → {align_ckpt}")
+                if cfg.get("eval", {}).get("datasets"):
+                    print(f"[VT-align] Eval at alignment step {astep+1} …")
+                    query_model.eval()
+                    evaluate_asymmetric(
+                        query_model, query_tokenizer, doc_splade, cfg, device,
+                        writer=writer, step=astep + 1, run_doc_doc=False, override_k=0,
+                        section="vocab_transplant",
+                    )
+                    query_model.train()
 
         del align_optimizer, align_loader
         print("[VT] Phase 1 complete.")
@@ -1012,20 +1040,24 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
 
         flops_scale = min(1.0, step / max(vc.get("flops_warmup_steps", 1), 1))
 
-        q_ids, q_mask, doc_texts, teacher_scores = next(batches)
+        q_ids, q_mask, q_texts, doc_texts = next(batches)
 
         # Doc encoding always runs in fp32 — BERT is not fp16-stable under gradients.
         # Gradient flows when LoRA is active; no_grad otherwise.
         doc_vecs = doc_splade.encode(doc_texts, vc["doc_max_length"], no_grad=not lora_enabled)
 
+        # Run doc encoder on queries for the alignment term (always frozen, fp32).
+        teacher_q_vecs = doc_splade.encode(q_texts, vc["query_max_length"], no_grad=True)
+
         optimizer.zero_grad()
         if lora_enabled:
             lora_optimizer.zero_grad()
         with autocast(enabled=vc["fp16"] and device.type == "cuda"):
-            loss, metrics = vocab_transplant_splade_loss(
-                query_model, q_ids, q_mask, doc_vecs, teacher_scores,
+            loss, metrics = vocab_transplant_joint_loss(
+                query_model, q_ids, q_mask, doc_vecs, teacher_q_vecs,
                 lambda_q=vc["lambda_q"],
                 flops_scale=flops_scale,
+                align_coeff=vc.get("align_coeff", 0.3),
             )
 
         scaler.scale(loss).backward()
@@ -1049,9 +1081,9 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
             lora_tag = " [+LoRA]" if lora_enabled else ""
             print(
                 f"[VT{lora_tag}] step {step+1:>7} | "
-                f"loss {metrics['loss']:.4f} | retr {metrics['retr']:.4f} | "
-                f"flops {metrics['flops']:.4f} | q_nnz {metrics['avg_q_nnz']:.1f} | "
-                f"lr {lr:.2e} | {elapsed:.0f}s"
+                f"loss {metrics['loss']:.4f} | rank {metrics['ranking']:.4f} | "
+                f"align {metrics['align']:.4f} | flops {metrics['flops']:.4f} | "
+                f"q_nnz {metrics['avg_q_nnz']:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
             )
             for k_name, v in metrics.items():
                 writer.add_scalar(f"vocab_transplant/{k_name}", v, step + 1)
@@ -1083,6 +1115,10 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _model_ckpt_root(hf_id: str) -> Path:
+    return Path(f"checkpoints_{hf_id.split('/')[-1]}")
+
 
 def _get_hidden_size(hf_id: str) -> int:
     from transformers import AutoConfig

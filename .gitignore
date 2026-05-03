@@ -10,6 +10,6 @@ build/
 *.lock
 xp/
 workdir/
-checkpoints/
+checkpoints_*/
 data/
 .claude/
