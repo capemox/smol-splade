@@ -1,7 +1,7 @@
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
   # HuggingFace model ID for the backbone encoder
-  hf_id: "jhu-clsp/ettin-encoder-68m"
+  hf_id: "jhu-clsp/ettin-encoder-17m"
 
   # SAE dictionary size (latent vocabulary). Scale relative to backbone hidden_size;
   # 65536 ≈ 85× for a 768-dim model. Reduce if memory is tight.
@@ -183,7 +183,7 @@ projected:
 # Run: uv run train.py vocab_transplant --config config.yaml
 vocab_transplant:
   # Small query encoder — must be loadable as AutoModelForMaskedLM
-  query_hf_id: "jhu-clsp/ettin-encoder-68m"
+  query_hf_id: "jhu-clsp/ettin-encoder-17m"
 
   # Frozen doc SPLADE — also donates its tokenizer to the query encoder
   doc_splade_hf_id: "naver/splade-v3"
@@ -230,6 +230,230 @@ vocab_transplant:
   log_every: 200
   save_every: 10_000
   output_dir: "vocab_transplant"
+
+
+# ── Stage 5b: Vocab transplant — alignment-only ──────────────────────────────
+# Cosine-alignment-only variant of vocab_transplant. Skips ranking fine-tuning.
+# Train with: uv run train.py vocab_transplant_align --config config.yaml
+#
+# Independent of the `vocab_transplant` section above so it can evolve without
+# polluting the joint two-phase flow. Only the keys actually consumed by
+# train_vocab_transplant_align live here — no nway, lr, max_steps, lambda_q,
+# flops, lora, distillation data path, etc.
+vocab_transplant_align:
+  # Small query encoder — must be loadable as AutoModelForMaskedLM
+  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+
+  # Frozen doc SPLADE — also donates its tokenizer to the query encoder
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # Vocab-transplant artifacts (shared with `vocab_transplant`; the transplant
+  # is content-addressed by query × doc model and reused if already built).
+  tokensurgeon_k: 64
+  transplant_dir: "transplanted_ettin"
+
+  # Alignment data — query texts (not corpus passages); same loader as the
+  # Phase 1 alignment used by `vocab_transplant`.
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  # Tokenisation / batch
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+
+  # Optimiser
+  alignment_steps: 50_000
+  alignment_lr: 5.0e-4   # cosine-decays to 1e-5 over alignment_steps
+  weight_decay: 0.01
+  fp16: true
+
+  # Logging / checkpoints
+  log_every: 200
+  save_every: 10_000
+  output_dir: "vocab_transplant_align"   # separate from `vocab_transplant`
+
+
+# ── Stage 5c: Random-init alignment (tokensurgeon ablation) ──────────────────
+# Same architecture as vocab_transplant_align (ettin backbone + donor MLM head
+# in donor vocab space) but the embedding table is randomly initialized instead
+# of being seeded by tokensurgeon.  Run both stages and compare final NDCG@10
+# to determine whether tokensurgeon's kNN embedding transfer actually helps.
+#
+# Requires a KD warmup phase because random embeddings start with q_nnz ≈ 10k
+# (everything active) — cosine alignment from that state causes dead-dim
+# collapse identical to the bert-small issue.
+#
+# Run: uv run train.py random_init_align --config config.yaml
+random_init_align:
+  # Same small query encoder as vocab_transplant_align
+  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+
+  # Frozen doc SPLADE — donates its tokenizer and vocab to the query encoder
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # Cache dir for the randomly-initialized model (built once, reused on reruns)
+  init_cache_dir: "ettin_random_init"
+
+  # Alignment data
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  # Tokenisation / batch
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+
+  # KD warmup: must be > 0 for random init (prevents dead-dim collapse)
+  kd_warmup_steps: 10_000
+  kd_temperature: 4.0
+
+  # Cosine alignment
+  alignment_steps: 50_000
+  alignment_lr: 5.0e-4   # cosine-decays to 1e-5 over kd_warmup + alignment steps
+  weight_decay: 0.01
+  fp16: true
+
+  # Logging / checkpoints
+  log_every: 200
+  save_every: 10_000
+  output_dir: "random_init_align"
+
+
+# ── Stage 5d: Doc-head alignment ──────────────────────────────────────────────
+# Like random_init_align but borrows the doc SPLADE's MLM head instead of using
+# a random one.  A linear projection (backbone_hidden → splade_hidden) bridges
+# the dimension gap (e.g. 256 → 768 for ettin-17m ↔ splade-v3).
+#
+# The MLM head is frozen by default: only the backbone and projection are
+# trained.  This tests whether the pre-trained head's structure (which dims
+# activate, which don't) is enough to bootstrap alignment without tokensurgeon.
+#
+# Training: KD warmup → cosine alignment, same recipe as random_init_align.
+#
+# Run: uv run train.py doc_head_align --config config.yaml
+doc_head_align:
+  query_hf_id: "jhu-clsp/ettin-encoder-17m"
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # Freeze the doc SPLADE's MLM head — only backbone + projection are trained.
+  # Set to false to allow the head to adapt (closer to the `projected` stage).
+  freeze_doc_head: true
+
+  # Alignment data
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  # Tokenisation / batch
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+
+  # KD warmup: initializes the projection before cosine alignment kicks in
+  kd_warmup_steps: 10_000
+  kd_temperature: 4.0
+
+  # Cosine alignment
+  alignment_steps: 50_000
+  alignment_lr: 5.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  # Logging / checkpoints
+  log_every: 200
+  save_every: 10_000
+  output_dir: "doc_head_align"
+
+
+# ── Stage 5e: Lion-SP-1B vocab transplant alignment ──────────────────────────
+# Vocab transplant + cosine alignment using Lion-SP-1B (1B bidirectional Llama-3)
+# as the frozen doc encoder instead of naver/splade-v3.  Tests whether
+# tokensurgeon scales to a larger, architecturally different donor with a very
+# different vocabulary (Llama-3 128K BPE vs ettin's 50K wordpiece).
+#
+# Llama-3 BPE shares very few exact tokens with BERT wordpiece, so most donor
+# positions are initialised by kNN interpolation.  A KD warmup phase is therefore
+# included before switching to cosine alignment.
+#
+# Run: uv run train.py lion_transplant_align --config config.yaml
+lion_transplant_align:
+  query_hf_id: "jhu-clsp/ettin-encoder-150m"
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+
+  # Transplant cache (built once, reused on reruns)
+  transplant_dir: "transplanted_ettin_lion"
+  tokensurgeon_k: 256
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 4   # effective batch = 16; smooths loss without extra GPU memory
+  eval_batch_size: 4   # Lion-SP-1B creates [B,128,128K] logits; keep small to avoid OOM
+
+  # KD warmup: critical when low-overlap transplant leaves most tokens approximate
+  kd_warmup_steps: 0
+  kd_temperature: 4.0
+
+  alignment_steps: 50_000
+  alignment_lr: 5.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  # FLOPs regularisation — penalises sum(|q_vecs|) to prevent high q_nnz and MSMARCO overfitting.
+  # Ramp over flops_warmup_steps so cosine alignment establishes first.
+  lambda_q: 0.02
+  flops_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_transplant_align"
+
+
+# ── Stage 6: Direct alignment (no vocab transplant) ──────────────────────────
+# Cosine alignment against a frozen doc SPLADE for query encoders that already
+# share the doc SPLADE's tokenizer (vocab=30522, bert-base-uncased).
+# No tokensurgeon step — the model is loaded directly from HuggingFace.
+#
+# Use this to ablate whether the vocab transplant is necessary, and to compare
+# BERT-family baselines against the transplanted ettin-17m result.
+#
+# Comparable model sizes to ettin-17m (17M, H=256):
+#   bert-mini:   google/bert_uncased_L-4_H-256_A-4  (~11M, same H=256)
+#   bert-small:  google/bert_uncased_L-4_H-512_A-8  (~29M)
+#
+# Train with: uv run train.py direct_align --config config.yaml
+direct_align:
+  # Query encoder — must share vocab with doc_splade_hf_id (vocab_size=30522).
+  # Change this to swap between bert-mini, bert-small, etc.
+  query_hf_id: "google/bert_uncased_L-4_H-512_A-8"   # bert-small, ~29M
+
+  # Frozen doc SPLADE
+  doc_splade_hf_id: "naver/splade-v3"
+
+  # Alignment data — MS MARCO query texts
+  queries_dataset: "Tevatron/msmarco-passage"
+
+  # Tokenisation / batch
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 8
+
+  # KD warmup: train with temperature-scaled KL divergence over pre-relu logits
+  # before switching to cosine alignment. Provides gradient to all vocabulary
+  # dimensions from the start, preventing the dead-dim collapse that occurs when
+  # cold-starting a BERT model without tokensurgeon initialisation.
+  # Set kd_warmup_steps to 0 to skip.
+  kd_warmup_steps: 10_000
+  kd_temperature: 4.0    # higher = softer targets, more dims receive gradient
+
+  # Optimiser
+  alignment_steps: 50_000
+  alignment_lr: 5.0e-4   # cosine-decays to 1e-5 over alignment_steps
+  weight_decay: 0.01
+  fp16: true
+
+  # Logging / checkpoints
+  log_every: 200
+  save_every: 10_000
+  output_dir: "direct_align"
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────

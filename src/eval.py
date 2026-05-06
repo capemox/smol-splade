@@ -63,11 +63,16 @@ def _ndcg_at_k(ranked_doc_ids: List[List[str]], qrels: Dict[str, Dict[str, int]]
 
 def _encode_texts_frozen(doc_splade, texts: List[str], max_length: int, batch_size: int) -> torch.Tensor:
     """Encode texts with FrozenDocSPLADE (handles its own tokenization); returns float32 on CPU."""
-    all_vecs = []
-    for i in range(0, len(texts), batch_size):
-        vecs = doc_splade.encode(texts[i : i + batch_size], max_length)
-        all_vecs.append(vecs.cpu().float())
-    return torch.cat(all_vecs, dim=0)
+    # Pre-allocate to avoid the 2× peak that torch.cat causes (copy of list + output tensor).
+    first = doc_splade.encode(texts[:batch_size], max_length).cpu().float()
+    out = torch.zeros(len(texts), first.shape[-1], dtype=torch.float32)
+    out[: len(first)] = first
+    del first
+    for i in range(batch_size, len(texts), batch_size):
+        vecs = doc_splade.encode(texts[i : i + batch_size], max_length).cpu().float()
+        out[i : i + len(vecs)] = vecs
+        del vecs
+    return out
 
 
 def evaluate_asymmetric(
@@ -94,13 +99,19 @@ def evaluate_asymmetric(
     datasets = ec.get("datasets", ["zeta-alpha-ai/NanoMSMARCO"])
     batch_size = ec.get("batch_size", 32)
     ac = cfg[section]
+    batch_size = ac.get("eval_batch_size", batch_size)
     doc_max = ac["doc_max_length"]
     query_max = ac["query_max_length"]
 
     query_model.eval()
     results: Dict[str, Dict[str, float]] = {}
 
+    import gc
+
     for ds_name in datasets:
+        gc.collect()
+        torch.cuda.empty_cache()
+
         short = ds_name.split("/")[-1]
         print(f"  [{short}] loading …")
         corpus_ids, corpus_texts, query_ids, query_texts, qrels = load_nanobeir(ds_name)
@@ -117,6 +128,7 @@ def evaluate_asymmetric(
                 [corpus_ids[i] for i in r]
                 for r in (q_vecs_dd @ corpus_vecs.T).argsort(dim=-1, descending=True).tolist()
             ]
+            del q_vecs_dd
             ndcg_dd = _ndcg_at_k(ranked_dd, qrels, query_ids, k=10)
             row["doc_doc"] = ndcg_dd
             print(f"  [{short}] NDCG@10  doc_doc (ceiling) : {ndcg_dd:.4f}")
@@ -130,6 +142,7 @@ def evaluate_asymmetric(
             [corpus_ids[i] for i in r]
             for r in (q_vecs_qd @ corpus_vecs.T).argsort(dim=-1, descending=True).tolist()
         ]
+        del corpus_vecs, q_vecs_qd
         ndcg_qd = _ndcg_at_k(ranked_qd, qrels, query_ids, k=10)
         row["query_doc"] = ndcg_qd
         print(f"  [{short}] NDCG@10  query_doc ({k_label})  : {ndcg_qd:.4f}")

@@ -11,11 +11,13 @@ Usage:
 """
 
 import argparse
+import json
 import math
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -124,93 +126,6 @@ def build_or_load_subset(full_corpus: dict, qrels: dict, max_corpus_size: int) -
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 
-def streaming_retrieve(
-    query_vecs_cpu,
-    doc_splade,
-    corpus_dataset,
-    text_field,
-    doc_max_length,
-    doc_batch_size,
-    query_batch_size,
-    topk,
-    device,
-):
-    """Stream corpus one batch at a time; score against query sub-batches.
-
-    VRAM at any point:
-        doc_splade model      ~440 MB
-        query sub-batch       query_batch_size × 30522 × 2 bytes fp16
-        doc batch             doc_batch_size   × 30522 × 2 bytes fp16
-    RAM at any point:
-        query_vecs_cpu        6980 × 30522 × 4 bytes fp32  ~854 MB
-        one doc batch buffer  doc_batch_size strings + encoded fp16 tensor
-    """
-    from datasets import load_dataset
-
-    Q = len(query_vecs_cpu)
-    top_scores = torch.full((Q, topk), float("-inf"))
-    # Store sequential corpus positions (= string doc IDs for Tevatron corpus)
-    top_doc_pos = torch.zeros((Q, topk), dtype=torch.long)
-
-    def process_batch(buf_texts, doc_start):
-        nonlocal top_scores, top_doc_pos
-        B = len(buf_texts)
-
-        # Encode on GPU, immediately pull back to CPU as fp16 to free VRAM
-        doc_vecs_cpu = doc_splade.encode(buf_texts, doc_max_length, no_grad=True).cpu().half()
-
-        for q_start in range(0, Q, query_batch_size):
-            q_end = min(q_start + query_batch_size, Q)
-
-            # Brief GPU residency: one query sub-batch + one doc batch
-            q_gpu = query_vecs_cpu[q_start:q_end].half().to(device)   # [Qb, vocab]
-            d_gpu = doc_vecs_cpu.to(device)                            # [B, vocab]
-            batch_scores = (q_gpu @ d_gpu.T).cpu().float()             # [Qb, B]
-            del q_gpu, d_gpu
-
-            combined = torch.cat([top_scores[q_start:q_end], batch_scores], dim=1)
-            doc_pos = torch.arange(doc_start, doc_start + B, dtype=torch.long)
-            combined_pos = torch.cat([
-                top_doc_pos[q_start:q_end],
-                doc_pos.unsqueeze(0).expand(q_end - q_start, -1),
-            ], dim=1)
-
-            new_top = combined.topk(topk, dim=1)
-            top_scores[q_start:q_end] = new_top.values
-            top_doc_pos[q_start:q_end] = combined_pos.gather(1, new_top.indices)
-
-    from tqdm import tqdm
-
-    print(f"Streaming corpus from {corpus_dataset} ...")
-    ds = load_dataset(corpus_dataset, split="train", streaming=True)
-
-    buf_texts: list = []
-    doc_position = 0
-    CORPUS_SIZE = 8_841_823  # known size; lets tqdm show accurate ETA
-
-    pbar = tqdm(total=CORPUS_SIZE, unit="doc", unit_scale=True, dynamic_ncols=True)
-
-    for item in ds:
-        text = item.get(text_field) or item.get("passage") or item.get("contents", "")
-        buf_texts.append(text)
-        doc_position += 1
-
-        if len(buf_texts) == doc_batch_size:
-            process_batch(buf_texts, doc_position - doc_batch_size)
-            buf_texts = []
-            pbar.update(doc_batch_size)
-
-    if buf_texts:
-        process_batch(buf_texts, doc_position - len(buf_texts))
-        pbar.update(len(buf_texts))
-
-    pbar.close()
-
-    # Tevatron docids are str(sequential_position), matching BeIR qrels corpus-ids
-    ranked = [[str(i) for i in row.tolist()] for row in top_doc_pos]
-    return ranked
-
-
 def list_retrieve(query_vecs_cpu, doc_splade, corpus_ids, corpus_texts, doc_max_length, doc_batch_size, query_batch_size, topk, device):
     """Retrieve from an in-memory corpus list (subset mode)."""
     from tqdm import tqdm
@@ -246,6 +161,137 @@ def list_retrieve(query_vecs_cpu, doc_splade, corpus_ids, corpus_texts, doc_max_
 
     pbar.close()
     return [[corpus_ids[i] for i in row.tolist()] for row in top_doc_idx]
+
+
+# ── Indexed retrieval (full corpus, on-disk SPLADE index) ─────────────────────
+
+def _load_manifest(index_dir: Path, expected_doc_splade: str, expected_vocab: int) -> dict:
+    """Load and validate the index manifest. Errors are user-actionable."""
+    manifest_path = index_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise SystemExit(
+            f"\nNo SPLADE index found at {index_dir}.\n"
+            f"Build it first (one-time, ~1-2h on an 8GB GPU):\n"
+            f"    uv run scripts/build_msmarco_index.py\n"
+        )
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("doc_splade_hf_id") != expected_doc_splade:
+        raise SystemExit(
+            f"\nIndex at {index_dir} was built for doc model "
+            f"{manifest.get('doc_splade_hf_id')!r}, but config specifies "
+            f"{expected_doc_splade!r}. Delete {index_dir} and rebuild."
+        )
+    if manifest.get("vocab_size") != expected_vocab:
+        raise SystemExit(
+            f"\nIndex vocab_size {manifest.get('vocab_size')} != model vocab_size "
+            f"{expected_vocab}. Delete {index_dir} and rebuild."
+        )
+    return manifest
+
+
+def _shard_files(index_dir: Path) -> list:
+    return sorted(index_dir.glob("shard_*.npz"))
+
+
+def indexed_retrieve(
+    query_vecs_cpu,
+    index_dir: Path,
+    vocab_size: int,
+    densify_chunk: int,
+    topk: int,
+    device: torch.device,
+):
+    """Retrieve top-k from on-disk sparse SPLADE index.
+
+    VRAM at any point:
+        queries dense fp16        Q × vocab × 2 B  (≈426 MB for 6980 × 30522)
+        densified doc chunk fp16  densify_chunk × vocab × 2 B
+        scores fp16               Q × densify_chunk × 2 B
+    """
+    from tqdm import tqdm
+
+    Q = len(query_vecs_cpu)
+    # Queries live on GPU as dense fp16 — small (~430MB) and reused for every chunk.
+    q_gpu = query_vecs_cpu.half().to(device)
+
+    top_scores = torch.full((Q, topk), float("-inf"), device=device, dtype=torch.float16)
+    # Track docids as integer slot positions into a flat list we accumulate.
+    top_doc_slot = torch.zeros((Q, topk), dtype=torch.long, device=device)
+    docid_table: list = []  # slot index → docid string
+
+    shards = _shard_files(index_dir)
+    if not shards:
+        raise SystemExit(f"No shard files in {index_dir}; rebuild the index.")
+
+    total_docs = 0
+    for sp in shards:
+        with np.load(sp, allow_pickle=True) as z:
+            total_docs += int(len(z["docids"]))
+
+    pbar = tqdm(total=total_docs, unit="doc", unit_scale=True, dynamic_ncols=True, desc="scoring")
+
+    for sp in shards:
+        with np.load(sp, allow_pickle=True) as z:
+            indices = z["indices"]            # int32, concat
+            values = z["values"]              # fp16, concat
+            offsets = z["offsets"]            # int64, length B+1
+            shard_docids = z["docids"].tolist()
+        B = len(shard_docids)
+
+        # Slot offset for this shard in the global docid_table
+        shard_slot_base = len(docid_table)
+        docid_table.extend(shard_docids)
+
+        # Process the shard in densify_chunk-sized GPU windows
+        for c_start in range(0, B, densify_chunk):
+            c_end = min(c_start + densify_chunk, B)
+            cb = c_end - c_start
+
+            # Build a dense fp16 [cb, vocab] tile on GPU from this slice's CSR rows
+            row_starts = offsets[c_start:c_end]
+            row_ends = offsets[c_start + 1 : c_end + 1]
+            tile_indices = indices[row_starts[0] : row_ends[-1]]
+            tile_values = values[row_starts[0] : row_ends[-1]]
+            tile_row_lengths = (row_ends - row_starts).astype(np.int64, copy=False)
+
+            d_dense = torch.zeros((cb, vocab_size), dtype=torch.float16, device=device)
+            if tile_indices.size > 0:
+                # Construct row index per nonzero entry, then scatter into the dense tile.
+                row_ids = np.repeat(np.arange(cb, dtype=np.int64), tile_row_lengths)
+                ri = torch.from_numpy(row_ids).to(device)
+                ci = torch.from_numpy(tile_indices.astype(np.int64, copy=False)).to(device)
+                vv = torch.from_numpy(tile_values).to(device)
+                d_dense[ri, ci] = vv
+
+            # Score: [Q, V] @ [V, cb] -> [Q, cb]
+            batch_scores = q_gpu @ d_dense.T  # fp16
+            del d_dense
+
+            # Slot positions in docid_table for this chunk
+            slot_pos = torch.arange(
+                shard_slot_base + c_start,
+                shard_slot_base + c_end,
+                dtype=torch.long, device=device,
+            )
+
+            combined = torch.cat([top_scores, batch_scores], dim=1)
+            combined_slots = torch.cat([
+                top_doc_slot,
+                slot_pos.unsqueeze(0).expand(Q, -1),
+            ], dim=1)
+            new_top = combined.topk(topk, dim=1)
+            top_scores = new_top.values
+            top_doc_slot = combined_slots.gather(1, new_top.indices)
+
+            del batch_scores, combined, combined_slots
+
+        pbar.update(B)
+
+    pbar.close()
+
+    # Materialise final ranked docid lists on CPU
+    slot_idx_cpu = top_doc_slot.cpu().numpy()
+    return [[docid_table[i] for i in row] for row in slot_idx_cpu]
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -304,9 +350,19 @@ def main():
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument(
         "--max_corpus_size", type=int, default=0,
-        help="Subsample corpus to this many passages (0 = full 8.8M). "
+        help="Subsample corpus to this many passages (0 = full 8.8M via on-disk index). "
              "Always includes all relevant passages; rest are random distractors. "
              "Cached to data/msmarco_dev_subset_N.pkl after first build.",
+    )
+    parser.add_argument(
+        "--index_dir", default="data/msmarco_index",
+        help="Path to prebuilt SPLADE index (used when --max_corpus_size 0). "
+             "Build with: uv run scripts/build_msmarco_index.py",
+    )
+    parser.add_argument(
+        "--densify_chunk", type=int, default=4096,
+        help="Docs densified per GPU tile during indexed scoring "
+             "(lower = less VRAM, more iterations)",
     )
     args = parser.parse_args()
 
@@ -338,8 +394,21 @@ def main():
         )
         ckpt_label = f"{vc['doc_splade_hf_id']} (doc_only ceiling)"
     else:
-        transplant_dir = vc["transplant_dir"]
-        print(f"Loading query model from {args.checkpoint} ...")
+        # Mirror train.py: vc["transplant_dir"] is a name resolved under the
+        # query model's checkpoint root (Path("checkpoints_" + last segment of
+        # query_hf_id) / vc["transplant_dir"]). Keeps train and eval in sync.
+        transplant_dir = str(
+            Path(f"checkpoints_{vc['query_hf_id'].split('/')[-1]}")
+            / vc["transplant_dir"]
+        )
+        if not Path(transplant_dir, "config.json").exists():
+            raise SystemExit(
+                f"Transplant directory not found: {transplant_dir}\n"
+                f"Expected layout (matches train.py): "
+                f"checkpoints_<query_model>/{vc['transplant_dir']}/config.json\n"
+                f"Check vocab_transplant.query_hf_id and vocab_transplant.transplant_dir in config.yaml."
+            )
+        print(f"Loading query model from {args.checkpoint} (architecture: {transplant_dir}) ...")
         query_model = VocabTransplantQuerySPLADE(transplant_dir)
         ckpt = torch.load(args.checkpoint, map_location="cpu")
         query_model.load_state_dict(ckpt["model"])
@@ -378,13 +447,28 @@ def main():
         )
         corpus_label = f"{len(corpus_texts):,}-passage subset"
     else:
-        # Full corpus: stream from HuggingFace dataset
-        ranked = streaming_retrieve(
-            query_vecs, doc_splade, corpus_dataset, text_field,
-            vc["doc_max_length"], args.doc_batch_size, args.query_batch_size,
-            args.topk, device,
+        # Full corpus: score against prebuilt on-disk SPLADE index.
+        # Doc encoder is no longer needed — free its VRAM before scoring.
+        index_dir = Path(args.index_dir)
+        manifest = _load_manifest(
+            index_dir,
+            expected_doc_splade=vc["doc_splade_hf_id"],
+            expected_vocab=doc_splade.vocab_size,
         )
-        corpus_label = "8.8M full corpus"
+        vocab_size = int(manifest["vocab_size"])
+        doc_splade.cpu()
+        del doc_splade
+        torch.cuda.empty_cache()
+
+        ranked = indexed_retrieve(
+            query_vecs, index_dir, vocab_size,
+            args.densify_chunk, args.topk, device,
+        )
+        n_indexed = sum(
+            int(np.load(sp, allow_pickle=True)["offsets"].shape[0] - 1)
+            for sp in _shard_files(index_dir)
+        )
+        corpus_label = f"{n_indexed:,}-passage on-disk index"
 
     n10 = ndcg_at_k(ranked, qrels, query_ids, k=10)
     m10 = mrr_at_k(ranked, qrels, query_ids, k=10)

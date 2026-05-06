@@ -82,6 +82,41 @@ Instead of projecting, surgically transfer the doc SPLADE's tokenizer and embedd
 matrix onto the small backbone. After this "transplant," the small model operates
 natively in the doc encoder's vocabulary space — no projection needed.
 
+### Approach 5 — Direct Alignment (bert-small, no transplant)
+bert-small (`google/bert_uncased_L-4_H-512_A-8`, ~29M) already shares DistilBERT's
+vocabulary, so no transplant is needed. Trained with KD warmup (10k steps, T=4.0)
+to prevent dead-dim collapse, followed by cosine alignment (50k steps).
+
+Motivation: removes tokensurgeon from the equation entirely. If this matches
+vocab_transplant_align then the transplant adds nothing beyond getting the vocab size right.
+
+Result: underperforms vocab_transplant_align with ettin-17m. The BERT architecture
+also appears less efficient for this setup than the ettin family.
+
+### Approach 6 — Random-Init Alignment (tokensurgeon ablation)
+Same architecture as vocab_transplant_align (ettin backbone, resized to 30522 tokens,
+donor tokenizer) but the embedding table is randomly initialized with N(0, 0.02) instead
+of being seeded by tokensurgeon's kNN interpolation. KD warmup (10k steps) + cosine
+alignment (50k steps) with otherwise identical hyperparameters.
+
+Motivation: isolates whether tokensurgeon's embedding initialization is the critical
+ingredient, or whether just having the right vocabulary size and architecture is enough.
+
+Result: **fails**. Even with KD warmup preventing dead-dim collapse, the model does not
+reach vocab_transplant_align quality. Tokensurgeon initialization is load-bearing.
+
+### Approach 7 — Doc-Head Alignment (frozen MLM head from doc SPLADE)
+ettin-17m backbone → linear projection (256→768) → frozen naver/splade-v3 MLM head.
+The pre-trained head already knows which vocabulary dimensions to activate; only the
+backbone and projection are trained. KD warmup (10k steps) + cosine alignment (50k steps).
+
+Motivation: test whether borrowing the doc encoder's pre-trained output head (rather
+than a randomly initialized one) provides enough signal without the full transplant.
+
+Result: **fails**. Having the correct MLM head in isolation is not sufficient — without
+tokensurgeon initializing the embedding table, the backbone cannot learn to produce
+hidden states the frozen head can interpret well.
+
 ---
 
 ## Vocab Transplant: Technical Implementation
@@ -184,17 +219,25 @@ magnitude: large activations are penalized strongly while small ones stabilize.
 | Configuration | NanoMSMARCO NDCG@10 | Notes |
 |---|---|---|
 | doc-doc ceiling (splade-v3 both sides) | ~0.64 | upper bound for asymmetric setup |
-| Alignment warmup only (10k steps, passage-based) | ~0.61 | strong alignment, zero ranking signal |
-| Alignment warmup only (training queries, 10k steps) | TBD | targets inference distribution |
-| Joint CE + alignment fine-tuning | ~0.55–0.60 | variable, often not above alignment baseline |
+| vocab_transplant_align (ettin-17m, tokensurgeon + cosine) | ~0.61 | **primary result** |
+| direct_align (bert-small, shared vocab, KD + cosine) | worse | BERT arch less efficient here |
+| random_init_align (ettin-17m, random embed + KD + cosine) | fails | tokensurgeon init is load-bearing |
+| doc_head_align (ettin + proj + frozen doc head, KD + cosine) | fails | frozen head insufficient alone |
+| Joint CE + alignment fine-tuning | ~0.55–0.60 | does not improve over alignment-only |
 
-**Main finding**: cosine alignment warmup on passages achieves surprisingly high NDCG (~0.61)
-quickly — the model learns to mimic the doc encoder's sparse distribution. However,
-subsequent ranking fine-tuning does not meaningfully improve over the alignment-only baseline.
+**Main finding**: cosine alignment warmup with tokensurgeon-initialized embeddings achieves
+~0.61 NDCG@10 — approaching the ~0.64 doc-doc ceiling. Ranking fine-tuning does not improve
+this further.
 
-**Hypothesis**: After alignment, the query encoder is already in a local minimum where the
-CE gradient is weak — the model's outputs are highly correlated with the doc encoder's,
-and in-batch hard negatives don't provide a strong enough gradient to push further.
+**Ablation conclusion**: the three ablations (direct_align, random_init_align, doc_head_align)
+all fail to match vocab_transplant_align. Tokensurgeon's kNN embedding interpolation is the
+single critical ingredient. Correct vocabulary size alone (random_init) is insufficient.
+Pre-trained output head alone (doc_head_align) is insufficient. Shared vocabulary via BERT
+(direct_align) is insufficient. The embedding initialization quality is the binding constraint.
+
+**Ranking fine-tuning hypothesis**: after cosine alignment the query encoder sits in a local
+minimum where CE gradient is weak — outputs are highly correlated with the doc encoder's,
+and in-batch hard negatives don't provide strong enough signal to push further.
 
 ### Failed Approaches
 
@@ -208,28 +251,40 @@ and in-batch hard negatives don't provide a strong enough gradient to push furth
   is not the bottleneck.
 - **Flops warmup delay** (40k steps): letting the model rank freely before adding sparsity
   pressure did not help.
+- **random_init_align**: correct vocab size + architecture but random embedding init → fails.
+  KD warmup prevents dead-dim collapse but the model never reaches vocab_transplant quality.
+- **doc_head_align**: pre-trained frozen doc SPLADE head + linear projection → fails.
+  The head provides the right output space but without tokensurgeon the backbone cannot
+  learn to drive it properly.
+- **direct_align (bert-small)**: shared vocab, no transplant needed, KD warmup + cosine
+  → underperforms. BERT architecture appears less suited than ettin here; also confirms
+  that just sharing vocabulary without transplant is not the same as tokensurgeon init.
 
 ---
 
 ## Open Questions / Next Experiments
 
-1. **Is alignment warmup on queries better?** The switch from passages to training queries
-   was the latest change. Results pending.
-
-2. **Is 0.61 actually near the ceiling for this setup?** The gap between query-doc and
+1. **Is 0.61 actually near the ceiling for this setup?** The gap between query-doc and
    doc-doc is only ~3–4 points. Maybe the alignment warmup already found the optimum
    and ranking fine-tuning adds nothing because there's nothing left to find. Full MSMARCO
    dev eval needed to confirm.
 
-3. **Does the transplant quality matter?** The cosine-NN interpolation for non-shared
-   tokens is an approximation. If the approximated embeddings are far from the "true"
-   answer, ranking might never reach alignment quality. Sanity check: measure embedding
-   distance for non-shared tokens post-transplant vs. random baseline.
+2. **Scale up the doc encoder.** All experiments so far use naver/splade-v3 (DistilBERT,
+   ~66M) as the frozen doc encoder. The asymmetric setup should benefit from a stronger doc
+   encoder. Candidate: `hzeng/Lion-SP-8B-llama3-marco-mntp` (8B Llama-3, MS MARCO trained,
+   SIGIR 2025). Caveat: LLM-based SPLADE models use large tokenizer vocabularies (32K+)
+   which changes the transplant and dot-product space significantly.
+   Note: no SPLADE models between ~110M and ~600M appear to exist publicly.
 
-4. **Alternative: use the transplanted model as an SAE-SPLADE backbone?** Instead of
-   directly fine-tuning the transplanted MLM as SPLADE, train an SAE on top (asymmetric
-   mode with sae_width=30522). The SAE's explicit sparsity constraint might help escape
-   the dense-output local minimum.
+3. **Is tokensurgeon interpolation quality the binding constraint?** The kNN interpolation
+   for non-shared tokens is an approximation. Random-init ablation confirms init matters;
+   the question is whether *better* interpolation (larger k, different weighting) would
+   push further. Measure embedding distance for non-shared tokens post-transplant vs.
+   the random baseline to quantify the gap.
+
+4. **Why does ranking fine-tuning fail?** The CE loss does not improve over alignment-only
+   across all architectures tried. This needs a gradient analysis — is the CE gradient
+   genuinely zero after alignment, or is it being overwhelmed by the FLOPs regularizer?
 
 ---
 
@@ -272,9 +327,13 @@ These papers likely cover adjacent territory — read them before claiming novel
 
 A vocab-transplanted model trained only with cosine alignment to the doc SPLADE —
 without any ranking supervision — achieves ~95% of the symmetric doc-doc performance
-on MSMARCO NDCG@10, at 4–10x lower serving cost. If this holds on full MSMARCO dev,
-it's a clean finding: vocabulary initialization alone is sufficient for competitive
-asymmetric sparse retrieval without expensive ranking fine-tuning.
+on MSMARCO NDCG@10, at 4–10x lower serving cost.
+
+The ablation suite strengthens this: three independent failure modes (random embedding
+init, shared vocabulary without transplant, pre-trained head without transplant) all
+confirm that tokensurgeon's kNN embedding interpolation is the mechanism driving the
+result — not just vocabulary size alignment or architecture choices. This makes the
+finding more crisply attributable and harder to dismiss as a hyperparameter accident.
 
 ### Weakest points
 

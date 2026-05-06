@@ -348,6 +348,111 @@ class FrozenDocSPLADE(nn.Module):
             logits = out.logits * mask                            # zero padding [B, L, V]
             return torch.log1p(torch.relu(logits).max(dim=1).values)  # [B, V]
 
+    def encode_logits(self, texts: List[str], max_length: int) -> torch.Tensor:
+        """Return max-pooled MLM logits BEFORE relu and log1p — ``[N, vocab_size]``.
+
+        Used for KD warmup: provides dense gradients to all vocabulary dimensions
+        regardless of their current activation state, avoiding the dead-dim collapse
+        that occurs when training cosine alignment from a cold-start BERT model.
+        """
+        device = next(self.parameters()).device
+        with torch.no_grad():
+            enc = self.tokenizer(
+                texts,
+                max_length=max_length,
+                truncation=True,
+                padding=True,
+                return_tensors="pt",
+            )
+            enc = {k: v.to(device) for k, v in enc.items()}
+            out = self.mlm(**enc)
+            mask = enc["attention_mask"].unsqueeze(-1).float()
+            logits = out.logits * mask                           # [B, L, V]
+            return logits.max(dim=1).values                      # [B, V]
+
+
+class FrozenLionSPLADE(nn.Module):
+    """Frozen Lion-SP SPLADE encoder (decoder-only Llama, bidirectional).
+
+    Loads hzeng/Lion-SP-*-llama3-marco-mntp (LoRA adapter on Llama-3) and applies
+    the Lion SPLADE formula:
+        log1p(relu(max_over_tokens(logits * hidden_size**-0.25)))
+
+    Uses transformers 5.x ``config.is_causal = False`` to enable bidirectional
+    attention — no custom class needed.  All parameters are frozen.
+    """
+
+    def __init__(self, hf_id: str):
+        super().__init__()
+        import json
+        from huggingface_hub import hf_hub_download
+        from transformers import LlamaForCausalLM, AutoTokenizer
+        from peft import PeftModel, LoraConfig
+
+        print(f"[FrozenLionSPLADE] Loading {hf_id} …")
+        adapter_cfg_path = hf_hub_download(hf_id, "adapter_config.json")
+        with open(adapter_cfg_path) as f:
+            adapter_cfg = json.load(f)
+        base_model_path = adapter_cfg["base_model_name_or_path"]
+        print(f"[FrozenLionSPLADE] Base model: {base_model_path}")
+
+        base = LlamaForCausalLM.from_pretrained(
+            base_model_path,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+        )
+        base.config.is_causal = False  # transformers 5.x bidirectional switch
+
+        lora_cfg = LoraConfig.from_pretrained(hf_id)
+        peft_model = PeftModel.from_pretrained(base, hf_id, config=lora_cfg, is_trainable=False)
+        merged = peft_model.merge_and_unload()
+        merged.config.is_causal = False  # preserve after merge
+        self.model = merged
+
+        self.hidden_size: int = self.model.config.hidden_size
+        self.vocab_size: int = self.model.config.vocab_size
+
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer.padding_side = "right"
+
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+    def _tokenize(self, texts: List[str], max_length: int) -> dict:
+        device = next(self.parameters()).device
+        enc = self.tokenizer(
+            texts,
+            max_length=max_length,
+            truncation=True,
+            padding=True,
+            return_tensors="pt",
+        )
+        return {k: v.to(device) for k, v in enc.items()}
+
+    def encode(self, texts: List[str], max_length: int, no_grad: bool = True) -> torch.Tensor:
+        """Encode texts to SPLADE vectors ``[N, vocab_size]``."""
+        import contextlib
+        ctx = torch.no_grad() if no_grad else contextlib.nullcontext()
+        with ctx:
+            enc = self._tokenize(texts, max_length)
+            logits = self.model(**enc, use_cache=False).logits  # [B, L, V]
+            logits = logits * (self.hidden_size ** -0.25)
+            mask = enc["attention_mask"].unsqueeze(-1).float()
+            logits = logits + (1.0 - mask) * -1e6
+            return torch.log1p(torch.relu(logits.max(dim=1).values))
+
+    def encode_logits(self, texts: List[str], max_length: int) -> torch.Tensor:
+        """Return max-pooled logits BEFORE relu/log1p — ``[N, vocab_size]``."""
+        with torch.no_grad():
+            enc = self._tokenize(texts, max_length)
+            logits = self.model(**enc, use_cache=False).logits
+            logits = logits * (self.hidden_size ** -0.25)
+            mask = enc["attention_mask"].unsqueeze(-1).float()
+            logits = logits + (1.0 - mask) * -1e6
+            return logits.max(dim=1).values
+
 
 def splade_loss(
     model: SAESPLADEModel,
@@ -494,6 +599,16 @@ class ProjectedQuerySPLADE(nn.Module):
         hidden = self.backbone(input_ids, attention_mask=attention_mask).last_hidden_state
         logits = self.mlm_head(self.proj(hidden)) * attention_mask.unsqueeze(-1).float()
         return torch.log1p(torch.relu(logits).max(dim=1).values)
+
+    def encode_logits(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return max-pooled MLM logits BEFORE relu and log1p — [B, vocab_size]."""
+        hidden = self.backbone(input_ids, attention_mask=attention_mask).last_hidden_state
+        logits = self.mlm_head(self.proj(hidden)) * attention_mask.unsqueeze(-1).float()
+        return logits.max(dim=1).values
 
 
 def projected_alignment_loss(

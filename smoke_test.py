@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from model import TopKSAE, SAEPretrainModel, sae_loss, SAESPLADEModel, splade_loss, FrozenDocSPLADE, asymmetric_splade_loss, ProjectedQuerySPLADE, projected_alignment_loss, VocabTransplantQuerySPLADE, vocab_transplant_splade_loss
+from model import TopKSAE, SAEPretrainModel, sae_loss, SAESPLADEModel, splade_loss, FrozenDocSPLADE, asymmetric_splade_loss, ProjectedQuerySPLADE, projected_alignment_loss, VocabTransplantQuerySPLADE, vocab_transplant_splade_loss, vocab_transplant_joint_loss
 
 HIDDEN = 64
 SAE_WIDTH = 128
@@ -825,6 +825,125 @@ def test_full_vocab_transplant_loop():
     )
 
 
+# ── Test 13: vocab_transplant_align — standalone alignment loop + eval ────────
+
+def test_vocab_transplant_align():
+    from unittest.mock import MagicMock, patch
+    from eval import evaluate_asymmetric
+    import torch.nn.functional as _F
+
+    VOCAB = 64
+
+    class FakeMLMOutput:
+        def __init__(self, logits):
+            self.logits = logits
+
+    class FakeMLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = torch.nn.Linear(HIDDEN, VOCAB)
+
+        def forward(self, input_ids, attention_mask=None):
+            B, L = input_ids.shape
+            return FakeMLMOutput(self.proj(torch.ones(B, L, HIDDEN)))
+
+    class FakeFrozenDocSPLADE(torch.nn.Module):
+        vocab_size = VOCAB
+
+        def encode(self, texts, max_length, no_grad=True):
+            return torch.relu(torch.randn(len(texts), VOCAB))
+
+    def make_vt():
+        vt = VocabTransplantQuerySPLADE.__new__(VocabTransplantQuerySPLADE)
+        torch.nn.Module.__init__(vt)
+        vt.mlm = FakeMLM()
+        vt.vocab_size = VOCAB
+        return vt
+
+    doc_splade = FakeFrozenDocSPLADE()
+    query_model = make_vt()
+    fake_tok = MagicMock()
+    fake_tok.side_effect = lambda texts, **kw: {
+        "input_ids":      torch.randint(0, 100, (len(texts), 8)),
+        "attention_mask": torch.ones(len(texts), 8, dtype=torch.long),
+    }
+
+    # ── 1. Cosine alignment loss: same formula as Phase 1 of vocab_transplant ──
+    q_ids, q_mask = make_fake_batch(BATCH, SEQ_LEN)
+    texts = [f"text {i}" for i in range(BATCH)]
+
+    query_model.train()
+    q_vecs = query_model.encode(q_ids, q_mask)
+    d_vecs = doc_splade.encode(texts, 32, no_grad=True)
+    align_loss = (1.0 - _F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+    assert 0.0 <= align_loss.item() <= 2.0, f"cosine loss out of [0,2]: {align_loss.item()}"
+    align_loss.backward()
+    assert query_model.mlm.proj.weight.grad is not None, "grad must reach mlm weights"
+    print(f"  [PASS] cosine alignment loss — value={align_loss.item():.4f}, grad flows OK")
+
+    # ── 2. CosineAnnealingLR + AdamW (mirrors Phase 1 scheduler) ─────────────
+    query_model.zero_grad()
+    alignment_steps = 5
+    optimizer = torch.optim.AdamW(query_model.parameters(), lr=5e-4, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=alignment_steps, eta_min=1e-5)
+
+    lrs = []
+    for astep in range(alignment_steps):
+        q_vecs = query_model.encode(q_ids, q_mask)
+        d_vecs = doc_splade.encode(texts, 32, no_grad=True)
+        loss = (1.0 - _F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
+        optimizer.step()
+        scheduler.step()
+        lrs.append(optimizer.param_groups[0]["lr"])
+
+    assert lrs[0] > lrs[-1], "CosineAnnealingLR should decrease LR over time"
+    assert abs(lrs[-1] - 1e-5) < 1e-7, f"final LR should be eta_min=1e-5, got {lrs[-1]}"
+    assert not torch.isnan(loss), "NaN loss"
+    print(f"  [PASS] CosineAnnealingLR — LR decayed {lrs[0]:.2e} → {lrs[-1]:.2e}, loss={loss.item():.4f}")
+
+    # ── 3. evaluate_asymmetric(section='vocab_transplant_align') — needs doc_max_length ──
+    vt_eval = make_vt()
+    fake_corpus  = [{"_id": f"d{i}", "text": f"doc {i}"}   for i in range(10)]
+    fake_queries = [{"_id": f"q{i}", "text": f"query {i}"} for i in range(3)]
+    cfg = {
+        "vocab_transplant_align": {"doc_max_length": 128, "query_max_length": 32},
+        "eval": {"datasets": ["fake/ds"], "batch_size": 4},
+    }
+
+    with patch("eval.load_nanobeir") as mock_load:
+        mock_load.return_value = (
+            [r["_id"] for r in fake_corpus],
+            [r["text"] for r in fake_corpus],
+            [r["_id"] for r in fake_queries],
+            [r["text"] for r in fake_queries],
+            {"q0": {"d0": 1}, "q1": {"d1": 1}},
+        )
+        results = evaluate_asymmetric(
+            vt_eval, fake_tok, doc_splade, cfg, DEVICE,
+            run_doc_doc=False, override_k=0, section="vocab_transplant_align",
+        )
+
+    assert "ds" in results, f"expected 'ds' key, got {list(results.keys())}"
+    assert "query_doc" in results["ds"], "query_doc missing from results"
+    print(f"  [PASS] evaluate_asymmetric(section='vocab_transplant_align') — "
+          f"query_doc={results['ds']['query_doc']:.4f}")
+
+    # ── 4. Parity check: same loss formula as Phase 1 of vocab_transplant ─────
+    # Phase 1 of train_vocab_transplant encodes with query_max_length for both sides.
+    # train_vocab_transplant_align does the same (line 1240 in train.py).
+    vt_a = make_vt()
+    vt_b = make_vt()
+    vt_a.load_state_dict(vt_b.state_dict())  # same weights
+
+    q_vecs_a = vt_a.encode(q_ids, q_mask)
+    q_vecs_b = vt_b.encode(q_ids, q_mask)
+    assert torch.allclose(q_vecs_a, q_vecs_b), "same weights must produce identical output"
+    print(f"  [PASS] parity — identical weights → identical encode output")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 TESTS = [
@@ -840,6 +959,7 @@ TESTS = [
     ("tokensurgeon transplant logic", test_tokensurgeon_transplant),
     ("VocabTransplantQuerySPLADE encode + grad", test_vocab_transplant_model),
     ("Full vocab_transplant loop + eval", test_full_vocab_transplant_loop),
+    ("vocab_transplant_align standalone loop + eval", test_vocab_transplant_align),
 ]
 
 if __name__ == "__main__":

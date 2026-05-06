@@ -800,6 +800,111 @@ def _run_tokensurgeon(
     print(f"[TRANSPLANT] Saved transplanted model → {out_path}")
 
 
+def _run_tokensurgeon_lion(
+    query_hf_id: str,
+    lion_hf_id: str,
+    out_path: str,
+    k: int = 64,
+):
+    """Vocab transplant from a Lion-SP LoRA adapter (Llama-3) onto a small MLM.
+
+    Same algorithm as ``_run_tokensurgeon`` but loads the donor model via the
+    PEFT library (LoRA adapter on LlamaForCausalLM) instead of AutoModelForMaskedLM.
+    Only the embedding table is extracted from the donor; no forward pass is run.
+    """
+    import json
+    import torch.nn.functional as F
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoModelForMaskedLM, AutoTokenizer, LlamaForCausalLM
+    from peft import PeftModel, LoraConfig
+
+    print(f"[TRANSPLANT-LION] {query_hf_id}  ←vocab—  {lion_hf_id}")
+
+    # ── Load tokenizers ───────────────────────────────────────────────
+    print("[TRANSPLANT-LION] Loading tokenizers …")
+    query_tok = AutoTokenizer.from_pretrained(query_hf_id)
+    donor_tok = AutoTokenizer.from_pretrained(lion_hf_id)
+    if donor_tok.pad_token_id is None:
+        donor_tok.pad_token_id = donor_tok.eos_token_id
+    query_vocab: dict = query_tok.get_vocab()
+    donor_vocab: dict = donor_tok.get_vocab()
+    donor_vocab_size = len(donor_vocab)
+    print(f"[TRANSPLANT-LION] Query vocab: {len(query_vocab):,} | Donor vocab: {donor_vocab_size:,}")
+
+    # ── Load query model (BERT-style MLM) ────────────────────────────
+    print("[TRANSPLANT-LION] Loading query model …")
+    query_model = AutoModelForMaskedLM.from_pretrained(query_hf_id)
+    orig_embed = query_model.get_input_embeddings().weight.data.float()  # [Q_V, H_q]
+    H_q = orig_embed.shape[1]
+
+    # ── Extract Lion donor embeddings (no forward pass needed) ────────
+    print("[TRANSPLANT-LION] Loading Lion donor model to extract embeddings …")
+    adapter_cfg_path = hf_hub_download(lion_hf_id, "adapter_config.json")
+    with open(adapter_cfg_path) as f:
+        adapter_cfg = json.load(f)
+    base_model_path = adapter_cfg["base_model_name_or_path"]
+    print(f"[TRANSPLANT-LION] Lion base model: {base_model_path}")
+
+    base = LlamaForCausalLM.from_pretrained(base_model_path)
+    lora_cfg = LoraConfig.from_pretrained(lion_hf_id)
+    peft_model = PeftModel.from_pretrained(base, lion_hf_id, config=lora_cfg, is_trainable=False)
+    merged = peft_model.merge_and_unload()
+    donor_embed = merged.get_input_embeddings().weight.data.float().cpu()  # [128K, H_d]
+    del merged, peft_model, base
+    print(f"[TRANSPLANT-LION] Donor embedding table: {donor_embed.shape}")
+
+    # ── Identify shared tokens (exact string match) ───────────────────
+    shared_tokens = list(set(query_vocab) & set(donor_vocab))
+    print(f"[TRANSPLANT-LION] Shared tokens: {len(shared_tokens):,} / {donor_vocab_size:,}  "
+          f"({100*len(shared_tokens)/donor_vocab_size:.1f}%)")
+
+    shared_q_idx = torch.tensor([query_vocab[t] for t in shared_tokens])
+    shared_d_idx = torch.tensor([donor_vocab[t] for t in shared_tokens])
+    query_shared = orig_embed[shared_q_idx]                          # [|S|, H_q]
+    donor_shared = donor_embed[shared_d_idx]                         # [|S|, H_d]
+    donor_shared_norm = F.normalize(donor_shared, dim=-1)
+
+    # ── Build new embedding matrix [D_V, H_q] ────────────────────────
+    new_embed = torch.zeros(donor_vocab_size, H_q, dtype=orig_embed.dtype)
+    for t in shared_tokens:
+        new_embed[donor_vocab[t]] = orig_embed[query_vocab[t]]
+
+    # ── Approximate non-shared tokens via kNN in donor space ─────────
+    non_shared = [t for t in donor_vocab if t not in set(shared_tokens)]
+    if non_shared:
+        print(f"[TRANSPLANT-LION] Approximating {len(non_shared):,} non-shared tokens (k={k}) …")
+        actual_k = min(k, len(shared_tokens))
+        ns_d_idx = torch.tensor([donor_vocab[t] for t in non_shared])
+        targets = donor_embed[ns_d_idx]
+        targets_norm = F.normalize(targets, dim=-1)
+
+        chunk_size = 512
+        for i in range(0, len(non_shared), chunk_size):
+            chunk_norm = targets_norm[i : i + chunk_size]
+            sims = chunk_norm @ donor_shared_norm.T
+            topk_vals, topk_idx = sims.topk(actual_k, dim=-1)
+            weights = 1.0 / (1.0 - topk_vals.clamp(max=0.9999) + 1e-6)
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+            approx = (weights.unsqueeze(-1) * query_shared[topk_idx]).sum(dim=1)
+            for j, t in enumerate(non_shared[i : i + chunk_size]):
+                new_embed[donor_vocab[t]] = approx[j]
+
+    # ── Resize model and install new embedding ────────────────────────
+    query_model.resize_token_embeddings(donor_vocab_size)
+    query_model.get_input_embeddings().weight.data.copy_(new_embed)
+
+    # ── Align special-token IDs with donor ────────────────────────────
+    for attr in ("pad_token_id", "bos_token_id", "eos_token_id",
+                 "unk_token_id", "mask_token_id"):
+        setattr(query_model.config, attr, getattr(donor_tok, attr, None))
+
+    # ── Save ──────────────────────────────────────────────────────────
+    Path(out_path).mkdir(parents=True, exist_ok=True)
+    query_model.save_pretrained(out_path)
+    donor_tok.save_pretrained(out_path)
+    print(f"[TRANSPLANT-LION] Saved transplanted model → {out_path}")
+
+
 def train_vocab_transplant(cfg: dict, resume: str | None = None):
     """Train a vocab-transplanted small MLM encoder as a SPLADE query model.
 
@@ -1113,6 +1218,940 @@ def train_vocab_transplant(cfg: dict, resume: str | None = None):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Stage 5b: Vocab-transplant — alignment-only
+# ──────────────────────────────────────────────────────────────────────────────
+
+def train_vocab_transplant_align(cfg: dict, resume: str | None = None):
+    """Cosine-alignment-only variant of vocab_transplant.
+
+    Self-contained — does not share code with ``train_vocab_transplant``.
+    Intentionally kept separate so it can diverge freely (alternative losses,
+    schedulers, samplers, etc.) without disturbing the original two-phase
+    flow.
+
+    Reads from its own ``vocab_transplant_align`` config section, kept
+    independent of ``vocab_transplant`` so the two flows can diverge freely.
+    Required keys:
+      - alignment_steps, alignment_lr, batch_size, query_max_length
+      - query_hf_id, doc_splade_hf_id, transplant_dir, output_dir
+      - log_every, save_every, fp16, weight_decay
+      - queries_dataset (optional, defaults to Tevatron/msmarco-passage)
+      - tokensurgeon_k (optional, defaults to 64)
+
+    Saves intermediate ``align_step_N.pt`` checkpoints and a final
+    ``align_final.pt`` to ``checkpoints_<query_model>/<output_dir>/``.
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    from transformers import AutoTokenizer
+    import torch.nn.functional as F
+
+    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
+    from eval import evaluate_asymmetric
+    from data import make_alignment_loader
+
+    if "vocab_transplant_align" not in cfg:
+        raise SystemExit(
+            "[VT-align] config.yaml is missing a `vocab_transplant_align:` "
+            "section. Add one (see config.yaml for the template)."
+        )
+    vc = cfg["vocab_transplant_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    alignment_steps = vc.get("alignment_steps", 0)
+    if alignment_steps <= 0:
+        raise SystemExit(
+            "[VT-align] alignment_steps must be > 0 in config.yaml "
+            "vocab_transplant section."
+        )
+
+    print(
+        f"[VT-align] query={vc['query_hf_id']} | doc={vc['doc_splade_hf_id']} | "
+        f"alignment_steps={alignment_steps} | alignment_lr={vc.get('alignment_lr', 5e-4)}"
+    )
+
+    # ── Step 1: vocab transplant (skipped if already populated) ───────
+    transplant_dir = str(_model_ckpt_root(vc["query_hf_id"]) / vc["transplant_dir"])
+    if not Path(transplant_dir, "config.json").exists():
+        _run_tokensurgeon(
+            query_hf_id=vc["query_hf_id"],
+            donor_hf_id=vc["doc_splade_hf_id"],
+            out_path=transplant_dir,
+            k=vc.get("tokensurgeon_k", 64),
+        )
+    else:
+        print(f"[VT-align] Transplanted model already exists at {transplant_dir}, skipping.")
+
+    # ── Step 2: load models ───────────────────────────────────────────
+    print(f"[VT-align] Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} …")
+    doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
+    doc_splade.to(device)
+    doc_splade.eval()
+
+    print(f"[VT-align] Loading transplanted query model from {transplant_dir} …")
+    query_model = VocabTransplantQuerySPLADE(transplant_dir)
+    query_model.to(device)
+    query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
+    n_params = sum(p.numel() for p in query_model.parameters())
+    print(f"[VT-align] Query model params: {n_params:,} | vocab_size: {query_model.vocab_size}")
+
+    # ── Resume (model state only; optimizer/scheduler reset) ──────────
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = ckpt.get("step", 0)
+        print(f"[VT-align] Resumed model state from {resume} at step {start_step}")
+
+    # ── Optimiser / scheduler / scaler ────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        query_model.parameters(),
+        lr=vc.get("alignment_lr", 5e-4),
+        weight_decay=vc["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=alignment_steps,
+        eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=vc["fp16"] and device.type == "cuda")
+
+    # ── Output dir & loader ───────────────────────────────────────────
+    out_dir = _model_ckpt_root(vc["query_hf_id"]) / vc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    align_loader = make_alignment_loader(
+        vc.get("queries_dataset", "Tevatron/msmarco-passage"),
+        "query",
+        query_tokenizer,
+        vc["batch_size"],
+        vc["query_max_length"],
+        device,
+    )
+
+    # ── Training loop ─────────────────────────────────────────────────
+    query_model.train()
+    t0 = time.time()
+    print(f"[VT-align] Training cosine alignment ({alignment_steps - start_step} steps remaining) …")
+
+    for astep in range(start_step, alignment_steps):
+        a_ids, a_mask, texts = next(align_loader)
+        optimizer.zero_grad()
+        with autocast(enabled=vc["fp16"] and device.type == "cuda"):
+            q_vecs = query_model.encode(a_ids, a_mask)
+            d_vecs = doc_splade.encode(texts, vc["query_max_length"], no_grad=True)
+            align_loss = (1.0 - F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+        q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+        scaler.scale(align_loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+        if (astep + 1) % vc["log_every"] == 0:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"[VT-align] step {astep+1:>6} | align_loss {align_loss.item():.4f} | "
+                f"q_nnz {q_nnz:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar("vocab_transplant_align/loss", align_loss.item(), astep + 1)
+            writer.add_scalar("vocab_transplant_align/q_nnz", q_nnz, astep + 1)
+            writer.add_scalar("vocab_transplant_align/lr", lr, astep + 1)
+            t0 = time.time()
+
+        if (astep + 1) % vc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{astep+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": astep + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if cfg.get("eval", {}).get("datasets"):
+                print(f"[VT-align] Eval at step {astep+1} …")
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=astep + 1, run_doc_doc=False, override_k=0,
+                    section="vocab_transplant_align",
+                )
+                query_model.train()
+
+    # ── Final save ────────────────────────────────────────────────────
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
+    print(f"[VT-align] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_lion_transplant_align(cfg: dict, resume: str | None = None):
+    """Vocab transplant + cosine alignment using Lion-SP-1B as the frozen doc encoder.
+
+    Mirrors ``train_vocab_transplant_align`` but uses a Lion-SP LoRA model
+    (bidirectional Llama-3, 128K vocab) instead of naver/splade-v3.  Because
+    Llama-3 BPE shares very few exact tokens with ettin's BERT wordpiece vocab,
+    most donor embeddings are approximated by kNN interpolation, leaving the
+    transplanted model in a weaker initial state than the BERT→BERT case.  A
+    KD warmup phase is therefore included before cosine alignment.
+
+    Reads from the ``lion_transplant_align`` config section.
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    from transformers import AutoTokenizer
+    import torch.nn.functional as F
+
+    from model import FrozenLionSPLADE, VocabTransplantQuerySPLADE
+    from eval import evaluate_asymmetric
+    from data import make_alignment_loader
+
+    if "lion_transplant_align" not in cfg:
+        raise SystemExit(
+            "[lion-align] config.yaml is missing a `lion_transplant_align:` section."
+        )
+    lc = cfg["lion_transplant_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    alignment_steps = lc.get("alignment_steps", 0)
+    if alignment_steps <= 0:
+        raise SystemExit("[lion-align] alignment_steps must be > 0.")
+
+    kd_warmup_steps  = lc.get("kd_warmup_steps", 10_000)
+    kd_temperature   = lc.get("kd_temperature", 4.0)
+    lambda_q         = lc.get("lambda_q", 0.0)
+    flops_warmup     = lc.get("flops_warmup_steps", 0)
+    grad_accum       = lc.get("gradient_accumulation_steps", 1)
+    total_steps = kd_warmup_steps + alignment_steps
+
+    print(
+        f"[lion-align] query={lc['query_hf_id']} | lion={lc['lion_hf_id']} | "
+        f"kd_warmup={kd_warmup_steps} | alignment={alignment_steps} | "
+        f"lr={lc.get('alignment_lr', 5e-4)} | lambda_q={lambda_q}"
+    )
+
+    # ── Step 1: vocab transplant (cached after first run) ─────────────
+    transplant_dir = str(_model_ckpt_root(lc["query_hf_id"]) / lc["transplant_dir"])
+    if not Path(transplant_dir, "config.json").exists():
+        _run_tokensurgeon_lion(
+            query_hf_id=lc["query_hf_id"],
+            lion_hf_id=lc["lion_hf_id"],
+            out_path=transplant_dir,
+            k=lc.get("tokensurgeon_k", 64),
+        )
+    else:
+        print(f"[lion-align] Transplanted model already exists at {transplant_dir}, skipping.")
+
+    # ── Step 2: load models ───────────────────────────────────────────
+    print(f"[lion-align] Loading frozen Lion-SP doc encoder: {lc['lion_hf_id']} …")
+    lion_doc = FrozenLionSPLADE(lc["lion_hf_id"])
+    lion_doc.to(device)
+    lion_doc.eval()
+
+    print(f"[lion-align] Loading transplanted query model from {transplant_dir} …")
+    query_model = VocabTransplantQuerySPLADE(transplant_dir)
+    query_model.to(device)
+    query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
+    if query_tokenizer.pad_token_id is None:
+        query_tokenizer.pad_token_id = query_tokenizer.eos_token_id
+    n_params = sum(p.numel() for p in query_model.parameters())
+    print(f"[lion-align] Query params: {n_params:,} | vocab_size: {query_model.vocab_size}")
+
+    # ── Resume ────────────────────────────────────────────────────────
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = ckpt.get("step", 0)
+        print(f"[lion-align] Resumed from {resume} at step {start_step}")
+
+    # ── Optimiser / scheduler / scaler ────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        query_model.parameters(),
+        lr=lc.get("alignment_lr", 5e-4),
+        weight_decay=lc["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps,
+        eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=lc["fp16"] and device.type == "cuda")
+
+    # ── Output dir & loader ───────────────────────────────────────────
+    out_dir = _model_ckpt_root(lc["query_hf_id"]) / lc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    align_loader = make_alignment_loader(
+        lc.get("queries_dataset", "Tevatron/msmarco-passage"),
+        "query",
+        query_tokenizer,
+        lc["batch_size"],
+        lc["query_max_length"],
+        device,
+    )
+
+    # ── Initial eval: doc-doc ceiling (Lion both sides) ──────────────
+    if start_step == 0 and cfg.get("eval", {}).get("datasets"):
+        print("[lion-align] Initial eval — doc_doc ceiling + query_doc baseline …")
+        import gc; gc.collect(); torch.cuda.empty_cache()
+        evaluate_asymmetric(
+            query_model, query_tokenizer, lion_doc, cfg, device,
+            writer=writer, step=0, run_doc_doc=True, override_k=0,
+            section="lion_transplant_align",
+        )
+
+    # ── Training loop ─────────────────────────────────────────────────
+    query_model.train()
+    t0 = time.time()
+    if kd_warmup_steps > 0 and start_step < kd_warmup_steps:
+        print(f"[lion-align] Phase 1: KD warmup ({kd_warmup_steps - start_step} steps, T={kd_temperature}) …")
+    print(f"[lion-align] Phase 2: cosine alignment ({alignment_steps} steps) …")
+
+    accum_loss = 0.0
+    q_vecs_log = None
+    optimizer.zero_grad()
+    for step in range(start_step, total_steps):
+        a_ids, a_mask, texts = next(align_loader)
+        is_accum_boundary = (step + 1) % grad_accum == 0 or (step + 1) == total_steps
+
+        in_kd_phase = step < kd_warmup_steps
+
+        with autocast(enabled=lc["fp16"] and device.type == "cuda"):
+            if in_kd_phase:
+                _raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits
+                _mask = a_mask.unsqueeze(-1).float()
+                q_logits = (_raw + (1.0 - _mask) * -1e6).max(dim=1).values
+                d_logits = lion_doc.encode_logits(texts, lc["query_max_length"]).to(q_logits.dtype)
+                T = kd_temperature
+                align_loss = F.kl_div(
+                    F.log_softmax(q_logits / T, dim=-1),
+                    F.softmax(d_logits / T, dim=-1),
+                    reduction="batchmean",
+                ) * T ** 2
+                with torch.no_grad():
+                    q_vecs = query_model.encode(a_ids, a_mask)
+            else:
+                q_vecs = query_model.encode(a_ids, a_mask)
+                d_vecs = lion_doc.encode(texts, lc["query_max_length"], no_grad=True)
+                align_loss = (1.0 - F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+                if lambda_q > 0.0:
+                    cos_step = step - kd_warmup_steps
+                    flops_scale = min(1.0, cos_step / flops_warmup) if flops_warmup > 0 else 1.0
+                    flops_loss = q_vecs.abs().sum(dim=-1).mean()
+                    align_loss = align_loss + flops_scale * lambda_q * flops_loss
+
+        q_vecs_log = q_vecs.detach()
+        accum_loss += align_loss.item()
+        scaler.scale(align_loss / grad_accum).backward()
+
+        if is_accum_boundary:
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            scheduler.step()
+            accum_loss = 0.0
+
+        if (step + 1) % lc["log_every"] == 0:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            phase = "kd" if in_kd_phase else "cos"
+            q_nnz = (q_vecs_log > 0).float().mean(0).sum().item()
+            flops_val = q_vecs_log.abs().sum(dim=-1).mean().item() if not in_kd_phase else 0.0
+            print(
+                f"[lion-align/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} | "
+                f"q_nnz {q_nnz:.1f} | flops {flops_val:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar(f"lion_transplant_align/{phase}/loss", align_loss.item(), step + 1)
+            writer.add_scalar("lion_transplant_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("lion_transplant_align/flops_q", flops_val, step + 1)
+            writer.add_scalar("lion_transplant_align/lr", lr, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % lc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if not in_kd_phase and cfg.get("eval", {}).get("datasets"):
+                print(f"[lion-align] Eval at step {step+1} …")
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, lion_doc, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="lion_transplant_align",
+                )
+                query_model.train()
+
+    # ── Final save ────────────────────────────────────────────────────
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": total_steps}, final_path)
+    print(f"[lion-align] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_random_init_align(cfg: dict, resume: str | None = None):
+    """Ablation: cosine alignment with a randomly-initialized query encoder.
+
+    Same architecture as vocab_transplant_align (ettin backbone + donor MLM head
+    in donor vocab space) but the embedding table is randomly initialized instead
+    of being seeded by tokensurgeon.  Isolates whether tokensurgeon's kNN
+    embedding transfer is load-bearing, or whether the right vocabulary size
+    and architecture are sufficient on their own.
+
+    Because the embeddings start random, the model needs a KD warmup phase
+    (temperature-scaled KL on pre-relu logits) to prevent dead-dim collapse
+    before switching to cosine alignment.
+
+    Reads from the ``random_init_align`` config section.  The randomly-initialized
+    model is cached in ``init_cache_dir`` so subsequent runs skip the build step.
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    from transformers import AutoModelForMaskedLM, AutoTokenizer
+    import torch.nn.functional as F
+
+    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
+    from eval import evaluate_asymmetric
+    from data import make_alignment_loader
+
+    if "random_init_align" not in cfg:
+        raise SystemExit(
+            "[random-init-align] config.yaml is missing a `random_init_align:` section."
+        )
+    rc = cfg["random_init_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    alignment_steps = rc.get("alignment_steps", 0)
+    if alignment_steps <= 0:
+        raise SystemExit("[random-init-align] alignment_steps must be > 0.")
+
+    kd_warmup_steps = rc.get("kd_warmup_steps", 10_000)
+    kd_temperature  = rc.get("kd_temperature", 4.0)
+    total_steps = kd_warmup_steps + alignment_steps
+
+    print(
+        f"[random-init-align] query={rc['query_hf_id']} | doc={rc['doc_splade_hf_id']} | "
+        f"kd_warmup={kd_warmup_steps} | alignment={alignment_steps} | "
+        f"lr={rc.get('alignment_lr', 5e-4)}"
+    )
+
+    # ── Step 1: build random-init model (cached after first run) ──────
+    cache_dir = str(_model_ckpt_root(rc["query_hf_id"]) / rc["init_cache_dir"])
+    if not Path(cache_dir, "config.json").exists():
+        print(f"[random-init-align] Building random-init model in donor vocab space …")
+        raw = AutoModelForMaskedLM.from_pretrained(rc["query_hf_id"])
+        donor_tok = AutoTokenizer.from_pretrained(rc["doc_splade_hf_id"])
+        donor_vocab_size = len(donor_tok.get_vocab())
+        raw.resize_token_embeddings(donor_vocab_size)
+        # Re-init so the ablation starts from pure noise, not ettin's rows 0..30521
+        # (which are semantically wrong for splade-v3 vocab IDs anyway).
+        torch.nn.init.normal_(raw.get_input_embeddings().weight, mean=0.0, std=0.02)
+        for attr in ("pad_token_id", "bos_token_id", "eos_token_id",
+                     "unk_token_id", "mask_token_id"):
+            setattr(raw.config, attr, getattr(donor_tok, attr, None))
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        raw.save_pretrained(cache_dir)
+        donor_tok.save_pretrained(cache_dir)
+        print(f"[random-init-align] Cached → {cache_dir}")
+    else:
+        print(f"[random-init-align] Random-init model already cached at {cache_dir}, skipping.")
+
+    # ── Step 2: load models ───────────────────────────────────────────
+    print(f"[random-init-align] Loading frozen doc SPLADE: {rc['doc_splade_hf_id']} …")
+    doc_splade = FrozenDocSPLADE(rc["doc_splade_hf_id"])
+    doc_splade.to(device)
+    doc_splade.eval()
+
+    print(f"[random-init-align] Loading query model from {cache_dir} …")
+    query_model = VocabTransplantQuerySPLADE(cache_dir)
+    query_model.to(device)
+    query_tokenizer = AutoTokenizer.from_pretrained(cache_dir)
+    n_params = sum(p.numel() for p in query_model.parameters())
+    print(f"[random-init-align] Query params: {n_params:,} | vocab_size: {query_model.vocab_size}")
+
+    # ── Resume ────────────────────────────────────────────────────────
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = ckpt.get("step", 0)
+        print(f"[random-init-align] Resumed from {resume} at step {start_step}")
+
+    # ── Optimiser / scheduler / scaler ────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        query_model.parameters(),
+        lr=rc.get("alignment_lr", 5e-4),
+        weight_decay=rc["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps,
+        eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=rc["fp16"] and device.type == "cuda")
+
+    # ── Output dir & loader ───────────────────────────────────────────
+    out_dir = _model_ckpt_root(rc["query_hf_id"]) / rc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    align_loader = make_alignment_loader(
+        rc.get("queries_dataset", "Tevatron/msmarco-passage"),
+        "query",
+        query_tokenizer,
+        rc["batch_size"],
+        rc["query_max_length"],
+        device,
+    )
+
+    # ── Training loop ─────────────────────────────────────────────────
+    query_model.train()
+    t0 = time.time()
+    if kd_warmup_steps > 0 and start_step < kd_warmup_steps:
+        print(f"[random-init-align] Phase 1: KD warmup ({kd_warmup_steps - start_step} steps, T={kd_temperature}) …")
+    print(f"[random-init-align] Phase 2: cosine alignment ({alignment_steps} steps) …")
+
+    for step in range(start_step, total_steps):
+        a_ids, a_mask, texts = next(align_loader)
+        optimizer.zero_grad()
+
+        in_kd_phase = step < kd_warmup_steps
+
+        with autocast(enabled=rc["fp16"] and device.type == "cuda"):
+            if in_kd_phase:
+                _raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits
+                _mask = a_mask.unsqueeze(-1).float()
+                q_logits = (_raw + (1.0 - _mask) * -1e6).max(dim=1).values
+                d_logits = doc_splade.encode_logits(texts, rc["query_max_length"]).to(q_logits.dtype)
+                T = kd_temperature
+                align_loss = F.kl_div(
+                    F.log_softmax(q_logits / T, dim=-1),
+                    F.softmax(d_logits / T, dim=-1),
+                    reduction="batchmean",
+                ) * T ** 2
+                with torch.no_grad():
+                    q_vecs = query_model.encode(a_ids, a_mask)
+            else:
+                q_vecs = query_model.encode(a_ids, a_mask)
+                d_vecs = doc_splade.encode(texts, rc["query_max_length"], no_grad=True)
+                align_loss = (1.0 - F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+
+        q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+        scaler.scale(align_loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+        if (step + 1) % rc["log_every"] == 0:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            phase = "kd" if in_kd_phase else "cos"
+            print(
+                f"[random-init-align/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} | "
+                f"q_nnz {q_nnz:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar(f"random_init_align/{phase}/loss", align_loss.item(), step + 1)
+            writer.add_scalar("random_init_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("random_init_align/lr", lr, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % rc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if not in_kd_phase and cfg.get("eval", {}).get("datasets"):
+                print(f"[random-init-align] Eval at step {step+1} …")
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="random_init_align",
+                )
+                query_model.train()
+
+    # ── Final save ────────────────────────────────────────────────────
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": total_steps}, final_path)
+    print(f"[random-init-align] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_doc_head_align(cfg: dict, resume: str | None = None):
+    """KD warmup + cosine alignment using the doc SPLADE's MLM head as vocabulary decoder.
+
+    Architecture: backbone (ettin-17m) → linear projection (hidden→splade_hidden)
+    → doc SPLADE MLM head → SPLADE vector in doc vocab space.
+
+    The MLM head is frozen by default (freeze_doc_head=true): only the backbone
+    and projection are trained.  This tests whether the pre-trained head's
+    structure alone bootstraps alignment without tokensurgeon.
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    from transformers import AutoTokenizer
+    import torch.nn.functional as F
+
+    from model import FrozenDocSPLADE, ProjectedQuerySPLADE
+    from eval import evaluate_asymmetric
+    from data import make_alignment_loader
+
+    if "doc_head_align" not in cfg:
+        raise SystemExit(
+            "[doc-head-align] config.yaml is missing a `doc_head_align:` section."
+        )
+    dc = cfg["doc_head_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    alignment_steps = dc.get("alignment_steps", 0)
+    if alignment_steps <= 0:
+        raise SystemExit("[doc-head-align] alignment_steps must be > 0.")
+
+    kd_warmup_steps = dc.get("kd_warmup_steps", 10_000)
+    kd_temperature  = dc.get("kd_temperature", 4.0)
+    freeze_doc_head = dc.get("freeze_doc_head", True)
+    total_steps = kd_warmup_steps + alignment_steps
+
+    print(
+        f"[doc-head-align] query={dc['query_hf_id']} | doc={dc['doc_splade_hf_id']} | "
+        f"kd_warmup={kd_warmup_steps} | alignment={alignment_steps} | "
+        f"freeze_doc_head={freeze_doc_head} | lr={dc.get('alignment_lr', 5e-4)}"
+    )
+
+    # ── Load models ───────────────────────────────────────────────────
+    print(f"[doc-head-align] Loading frozen doc SPLADE: {dc['doc_splade_hf_id']} …")
+    doc_splade = FrozenDocSPLADE(dc["doc_splade_hf_id"])
+    doc_splade.to(device)
+    doc_splade.eval()
+
+    print(f"[doc-head-align] Building query encoder …")
+    query_model = ProjectedQuerySPLADE(dc["query_hf_id"], dc["doc_splade_hf_id"])
+    if freeze_doc_head:
+        for p in query_model.mlm_head.parameters():
+            p.requires_grad_(False)
+    query_model.to(device)
+
+    query_tokenizer = AutoTokenizer.from_pretrained(dc["query_hf_id"])
+
+    trainable = sum(p.numel() for p in query_model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in query_model.parameters())
+    print(f"[doc-head-align] Params — total: {total_params:,} | trainable: {trainable:,} | "
+          f"vocab_size: {query_model.vocab_size}")
+
+    # ── Resume ────────────────────────────────────────────────────────
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = ckpt.get("step", 0)
+        print(f"[doc-head-align] Resumed from {resume} at step {start_step}")
+
+    # ── Optimiser / scheduler / scaler ────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, query_model.parameters()),
+        lr=dc.get("alignment_lr", 5e-4),
+        weight_decay=dc["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps,
+        eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=dc["fp16"] and device.type == "cuda")
+
+    # ── Output dir & loader ───────────────────────────────────────────
+    out_dir = _model_ckpt_root(dc["query_hf_id"]) / dc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    align_loader = make_alignment_loader(
+        dc.get("queries_dataset", "Tevatron/msmarco-passage"),
+        "query",
+        query_tokenizer,
+        dc["batch_size"],
+        dc["query_max_length"],
+        device,
+    )
+
+    # ── Training loop ─────────────────────────────────────────────────
+    query_model.train()
+    t0 = time.time()
+    if kd_warmup_steps > 0 and start_step < kd_warmup_steps:
+        print(f"[doc-head-align] Phase 1: KD warmup ({kd_warmup_steps - start_step} steps, T={kd_temperature}) …")
+    print(f"[doc-head-align] Phase 2: cosine alignment ({alignment_steps} steps) …")
+
+    for step in range(start_step, total_steps):
+        a_ids, a_mask, texts = next(align_loader)
+        optimizer.zero_grad()
+
+        in_kd_phase = step < kd_warmup_steps
+
+        with autocast(enabled=dc["fp16"] and device.type == "cuda"):
+            if in_kd_phase:
+                q_logits = query_model.encode_logits(a_ids, a_mask)
+                d_logits = doc_splade.encode_logits(texts, dc["query_max_length"]).to(q_logits.dtype)
+                T = kd_temperature
+                align_loss = F.kl_div(
+                    F.log_softmax(q_logits / T, dim=-1),
+                    F.softmax(d_logits / T, dim=-1),
+                    reduction="batchmean",
+                ) * T ** 2
+                with torch.no_grad():
+                    q_vecs = query_model.encode(a_ids, a_mask)
+            else:
+                q_vecs = query_model.encode(a_ids, a_mask)
+                d_vecs = doc_splade.encode(texts, dc["query_max_length"], no_grad=True)
+                align_loss = (1.0 - F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+
+        q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+        scaler.scale(align_loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in query_model.parameters() if p.requires_grad], 1.0
+        )
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+        if (step + 1) % dc["log_every"] == 0:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            phase = "kd" if in_kd_phase else "cos"
+            print(
+                f"[doc-head-align/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} | "
+                f"q_nnz {q_nnz:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar(f"doc_head_align/{phase}/loss", align_loss.item(), step + 1)
+            writer.add_scalar("doc_head_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("doc_head_align/lr", lr, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % dc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if not in_kd_phase and cfg.get("eval", {}).get("datasets"):
+                print(f"[doc-head-align] Eval at step {step+1} …")
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="doc_head_align",
+                )
+                query_model.train()
+
+    # ── Final save ────────────────────────────────────────────────────
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": total_steps}, final_path)
+    print(f"[doc-head-align] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_direct_align(cfg: dict, resume: str | None = None):
+    """Cosine alignment against a frozen doc SPLADE — no vocab transplant.
+
+    For query encoders that already share the doc SPLADE's tokenizer
+    (vocab_size=30522, bert-base-uncased).  Skips tokensurgeon entirely;
+    the model is loaded directly from HuggingFace.
+
+    Training has two phases:
+      1. KD warmup (kd_warmup_steps): temperature-scaled KL divergence on
+         pre-relu max-pooled logits. Provides gradient to all vocabulary
+         dimensions, preventing the dead-dim collapse that happens when
+         cold-starting a BERT model without tokensurgeon initialisation.
+      2. Cosine alignment (remaining steps): standard 1 - cosine_similarity
+         on SPLADE sparse vectors, same as vocab_transplant_align.
+
+    Set kd_warmup_steps=0 to skip phase 1 (not recommended).
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    from transformers import AutoTokenizer
+    import torch.nn.functional as F
+
+    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
+    from eval import evaluate_asymmetric
+    from data import make_alignment_loader
+
+    if "direct_align" not in cfg:
+        raise SystemExit(
+            "[direct_align] config.yaml is missing a `direct_align:` section."
+        )
+    dc = cfg["direct_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    alignment_steps = dc.get("alignment_steps", 0)
+    if alignment_steps <= 0:
+        raise SystemExit("[direct_align] alignment_steps must be > 0.")
+
+    kd_warmup_steps = dc.get("kd_warmup_steps", 0)
+    kd_temperature  = dc.get("kd_temperature", 4.0)
+    total_steps = kd_warmup_steps + alignment_steps
+
+    print(
+        f"[direct_align] query={dc['query_hf_id']} | doc={dc['doc_splade_hf_id']} | "
+        f"kd_warmup={kd_warmup_steps} | alignment={alignment_steps} | "
+        f"lr={dc.get('alignment_lr', 5e-4)}"
+    )
+
+    # ── Load models ───────────────────────────────────────────────────
+    print(f"[direct_align] Loading frozen doc SPLADE: {dc['doc_splade_hf_id']} …")
+    doc_splade = FrozenDocSPLADE(dc["doc_splade_hf_id"])
+    doc_splade.to(device)
+    doc_splade.eval()
+
+    print(f"[direct_align] Loading query model: {dc['query_hf_id']} …")
+    query_model = VocabTransplantQuerySPLADE(dc["query_hf_id"])
+    query_model.to(device)
+    query_tokenizer = AutoTokenizer.from_pretrained(dc["query_hf_id"])
+
+    # Fail fast if vocab sizes don't match — alignment won't make sense otherwise.
+    doc_vocab = doc_splade.tokenizer.vocab_size
+    if query_model.vocab_size != doc_vocab:
+        raise SystemExit(
+            f"[direct_align] Vocab size mismatch: query model has "
+            f"{query_model.vocab_size} tokens, doc SPLADE has {doc_vocab}. "
+            f"Use vocab_transplant_align instead, or pick a model with "
+            f"vocab_size={doc_vocab} (e.g. google/bert_uncased_L-4_H-256_A-4)."
+        )
+
+    n_params = sum(p.numel() for p in query_model.parameters())
+    print(f"[direct_align] Query model params: {n_params:,} | vocab_size: {query_model.vocab_size}")
+
+    # ── Resume ────────────────────────────────────────────────────────
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = ckpt.get("step", 0)
+        print(f"[direct_align] Resumed from {resume} at step {start_step}")
+
+    # ── Optimiser / scheduler / scaler ────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        query_model.parameters(),
+        lr=dc.get("alignment_lr", 5e-4),
+        weight_decay=dc["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps,
+        eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=dc["fp16"] and device.type == "cuda")
+
+    # ── Output dir & loader ───────────────────────────────────────────
+    out_dir = _model_ckpt_root(dc["query_hf_id"]) / dc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    align_loader = make_alignment_loader(
+        dc.get("queries_dataset", "Tevatron/msmarco-passage"),
+        "query",
+        query_tokenizer,
+        dc["batch_size"],
+        dc["query_max_length"],
+        device,
+    )
+
+    # ── Training loop ─────────────────────────────────────────────────
+    query_model.train()
+    t0 = time.time()
+    if kd_warmup_steps > 0 and start_step < kd_warmup_steps:
+        print(f"[direct_align] Phase 1: KD warmup ({kd_warmup_steps - start_step} steps, T={kd_temperature}) …")
+    print(f"[direct_align] Phase 2: cosine alignment ({alignment_steps} steps) …")
+
+    for step in range(start_step, total_steps):
+        a_ids, a_mask, texts = next(align_loader)
+        optimizer.zero_grad()
+
+        in_kd_phase = step < kd_warmup_steps
+
+        with autocast(enabled=dc["fp16"] and device.type == "cuda"):
+            if in_kd_phase:
+                # Phase 1: KL divergence on pre-relu logits — gradient flows to
+                # all vocab dims regardless of current activation state.
+                _raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits
+                _mask = a_mask.unsqueeze(-1).float()
+                q_logits = (_raw + (1.0 - _mask) * -1e6).max(dim=1).values
+                d_logits = doc_splade.encode_logits(texts, dc["query_max_length"]).to(q_logits.dtype)
+                T = kd_temperature
+                align_loss = F.kl_div(
+                    F.log_softmax(q_logits / T, dim=-1),
+                    F.softmax(d_logits / T, dim=-1),
+                    reduction="batchmean",
+                ) * T ** 2
+                with torch.no_grad():
+                    q_vecs = query_model.encode(a_ids, a_mask)
+            else:
+                # Phase 2: cosine alignment on sparse SPLADE vectors.
+                q_vecs = query_model.encode(a_ids, a_mask)
+                d_vecs = doc_splade.encode(texts, dc["query_max_length"], no_grad=True)
+                align_loss = (1.0 - F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
+
+        q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+        scaler.scale(align_loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(list(query_model.parameters()), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+        if (step + 1) % dc["log_every"] == 0:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            phase = "kd" if in_kd_phase else "cos"
+            print(
+                f"[direct_align/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} | "
+                f"q_nnz {q_nnz:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar(f"direct_align/{phase}/loss", align_loss.item(), step + 1)
+            writer.add_scalar("direct_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("direct_align/lr", lr, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % dc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            # Only run NDCG eval during the cosine phase — KD logits aren't sparse vectors yet.
+            if not in_kd_phase and cfg.get("eval", {}).get("datasets"):
+                print(f"[direct_align] Eval at step {step+1} …")
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="direct_align",
+                )
+                query_model.train()
+
+    # ── Final save ────────────────────────────────────────────────────
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": total_steps}, final_path)
+    print(f"[direct_align] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1179,7 +2218,15 @@ def _save_splade(model, optimizer, scheduler, step, path):
 
 def main():
     parser = argparse.ArgumentParser(description="Train SAE-SPLADE with ettin-17m")
-    parser.add_argument("stage", choices=["sae", "splade", "asymmetric", "projected", "vocab_transplant"], help="Training stage to run")
+    parser.add_argument(
+        "stage",
+        choices=[
+            "sae", "splade", "asymmetric", "projected",
+            "vocab_transplant", "vocab_transplant_align", "lion_transplant_align",
+            "random_init_align", "doc_head_align", "direct_align",
+        ],
+        help="Training stage to run.",
+    )
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from")
     args = parser.parse_args()
@@ -1195,6 +2242,16 @@ def main():
         train_asymmetric(cfg, resume=args.resume)
     elif args.stage == "projected":
         train_projected(cfg, resume=args.resume)
+    elif args.stage == "vocab_transplant_align":
+        train_vocab_transplant_align(cfg, resume=args.resume)
+    elif args.stage == "lion_transplant_align":
+        train_lion_transplant_align(cfg, resume=args.resume)
+    elif args.stage == "random_init_align":
+        train_random_init_align(cfg, resume=args.resume)
+    elif args.stage == "doc_head_align":
+        train_doc_head_align(cfg, resume=args.resume)
+    elif args.stage == "direct_align":
+        train_direct_align(cfg, resume=args.resume)
     else:
         train_vocab_transplant(cfg, resume=args.resume)
 

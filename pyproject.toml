@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml",
     "numpy",
     "peft>=0.19.1",
+    "hf-transfer>=0.1.9",
 ]
 
 [tool.uv]
