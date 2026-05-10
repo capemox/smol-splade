@@ -397,10 +397,27 @@ lion_transplant_align:
   weight_decay: 0.01
   fp16: true
 
-  # FLOPs regularisation — penalises sum(|q_vecs|) to prevent high q_nnz and MSMARCO overfitting.
-  # Ramp over flops_warmup_steps so cosine alignment establishes first.
-  lambda_q: 0.02
+  # FLOPs regularisation (squared-mean form: gradient ∝ activation).
+  # Lion's d_nnz on queries is ~250–350 per query (observed live during training
+  # via the d_nnz logging). Cosine alignment self-regularises q_nnz toward that
+  # target without much help; lambda_q just provides a soft anchor.
+  lambda_q: 0.001
   flops_warmup_steps: 5_000
+
+  # Weight on the softmax-KL safety-net term (added to cosine alignment in the
+  # post-warmup phase). KL operates on raw logits and is independent of the
+  # relu in the SPLADE encoding. Set to 0 for pure cosine.
+  kl_coeff: 1.0
+
+  # MLM warmup phase before alignment. Re-trains body+head on standard
+  # masked-LM in the donor's vocabulary to fix head-body coherence after the
+  # transplant. ettin-150m doesn't need this (head-body coherence survived
+  # the swap). bert-base-uncased does — without it q_logits stay heavily
+  # negative through training and cosine alignment can't escape dead relu.
+  # Default 0 (off). Recommend 5000-10000 for bert-style backbones.
+  mlm_warmup_steps: 0
+  mlm_mask_rate: 0.15
+  # mlm_warmup_lr: 5.0e-4    # defaults to alignment_lr
 
   log_every: 200
   save_every: 10_000
@@ -454,6 +471,84 @@ direct_align:
   log_every: 200
   save_every: 10_000
   output_dir: "direct_align"
+
+
+# ── Stage 7: Shallow SPLADE alignment ────────────────────────────────────────
+# Query encoder = first n_layers of the doc SPLADE backbone (50% = 3 of 6 layers).
+# Shares tokenizer, embedding table, and MLM head with the frozen doc encoder —
+# no vocab transplant, no projection, no cross-architecture mismatch.
+#
+# Two-phase training:
+#   Phase 0 (freeze_warmup_steps): only the kept body layers train.
+#     Embeddings + MLM head stay frozen at doc-encoder values, giving the body
+#     a stable target before the input representations start moving too.
+#   Phase 1 (alignment_steps): embeddings unfreeze; everything trains except
+#     the MLM head (must stay frozen for dot-product compatibility with doc side).
+#
+# Loss: cos(q_vecs, d_vecs) + kl_coeff * KL(q_logits/T || d_logits/T)
+#   Same recipe as the successful ettin-150m Lion run.
+#
+# Run: uv run train.py splade_shallow_align --config config.yaml
+splade_shallow_align:
+  doc_splade_hf_id: "naver/splade-v3"
+  n_layers: 3                  # 25% of BERT-base's 12 layers (splade-v3 is bert-base)
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 16
+  gradient_accumulation_steps: 2   # effective batch = 32
+  eval_batch_size: 32              # splade-v3 is small; 32 fits easily
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.1          # MLM head + embeddings LR as fraction of body LR at phase transition
+
+  # Phase 1: full alignment
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4            # cosine-decays to 1e-5 over alignment_steps
+  weight_decay: 0.01
+  fp16: true
+
+  # MarginMSE distillation: teacher = frozen splade-v3, student = shallow model
+  nway: 8                         # 1 positive + 7 hard negatives per query (from Tevatron)
+  lambda_q: 0.0001                # target L1 for sparsity; STE prevents dead-ReLU
+  lambda_q_warmup_steps: 5_000   # ramp lambda_q 0→target so model learns dims before pruning
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "splade_shallow_align"
+
+
+# ── Stage: Lion-SP-1B shallow query encoder ───────────────────────────────────
+# Same recipe as splade_shallow_align but applied to Lion-SP-1B (Llama-3 1B).
+# Query encoder = full Lion truncated to n_layers; doc encoder = frozen full Lion.
+# Run: uv run train.py lion_shallow_align --config config.yaml
+lion_shallow_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 3
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8   # effective batch = 32
+  eval_batch_size: 4               # Lion is large; keep small to avoid OOM
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.1
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_align"
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────

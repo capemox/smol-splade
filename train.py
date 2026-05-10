@@ -894,9 +894,32 @@ def _run_tokensurgeon_lion(
     query_model.get_input_embeddings().weight.data.copy_(new_embed)
 
     # ── Align special-token IDs with donor ────────────────────────────
+    # The tokenizer (saved alongside) carries the donor's correct IDs. The
+    # model config's special-token IDs are only needed for forward-time
+    # behaviour (padding_idx in some embedding layers, ignore_index in some
+    # losses). Donor IDs are typically very large (Llama-3 pad=128001) and
+    # exceed embedding ranges in some backbones — RoBERTa's position
+    # embeddings have only `max_position_embeddings≈514` rows but use
+    # `padding_idx=config.pad_token_id`, so a large pad_token_id breaks
+    # model construction at load time. Skip any ID that's >= the new vocab
+    # size or would obviously overflow positional padding.
+    max_pos = getattr(query_model.config, "max_position_embeddings", None)
     for attr in ("pad_token_id", "bos_token_id", "eos_token_id",
                  "unk_token_id", "mask_token_id"):
-        setattr(query_model.config, attr, getattr(donor_tok, attr, None))
+        new_id = getattr(donor_tok, attr, None)
+        if new_id is None:
+            continue
+        # Skip if it would crash an embedding layer that uses this id as
+        # padding_idx (RoBERTa does this with pad_token_id specifically).
+        if attr == "pad_token_id" and max_pos is not None and new_id >= max_pos:
+            print(
+                f"[TRANSPLANT-LION] Keeping original pad_token_id "
+                f"({getattr(query_model.config, 'pad_token_id', None)}); donor "
+                f"value {new_id} would exceed max_position_embeddings={max_pos} "
+                "and break position-embedding construction."
+            )
+            continue
+        setattr(query_model.config, attr, new_id)
 
     # ── Save ──────────────────────────────────────────────────────────
     Path(out_path).mkdir(parents=True, exist_ok=True)
@@ -1495,6 +1518,174 @@ def train_lion_transplant_align(cfg: dict, resume: str | None = None):
         device,
     )
 
+    # ── Calibrate the MLM head bias so initial q_logits ≈ 0 ──────────
+    # Different backbones produce wildly different post-transplant q_logit
+    # distributions (ettin-150m: mean=+0.40, 59% positive; bert-base: mean=-2.70,
+    # 0.87% positive). A heavily negative starting mean puts the model in the
+    # dead-relu basin from step 0 — the cosine alignment can't escape because
+    # the relu has no gradient on negative logits.
+    #
+    # Fix: measure mean(q_logits) on a small batch of real training queries,
+    # then shift the MLM bias by -mean. This re-centers any backbone to the
+    # same healthy starting point. Skipped on resume.
+    if start_step == 0 and lc.get("calibrate_bias", True):
+        with torch.no_grad():
+            n_cal = lc.get("calibrate_batches", 16)
+            means = []
+            query_model.eval()
+            for _ in range(n_cal):
+                ids, mask, _ = next(align_loader)
+                raw = query_model.mlm(input_ids=ids, attention_mask=mask).logits
+                logits = (raw + (1.0 - mask.unsqueeze(-1).float()) * -1e6).max(dim=1).values
+                means.append(logits.float().mean().item())
+            shift = sum(means) / len(means)
+            V = query_model.vocab_size
+            bias_params = [
+                (n, p) for n, p in query_model.mlm.named_parameters()
+                if p.dim() == 1 and p.shape[0] == V
+            ]
+            if bias_params:
+                for name, par in bias_params:
+                    par.data -= shift
+                print(
+                    f"[lion-align] Calibrated MLM bias: shifted by {-shift:+.3f} "
+                    f"({len(bias_params)} param(s): {[n for n, _ in bias_params]})"
+                )
+            else:
+                print(
+                    "[lion-align] WARNING: no vocab-sized bias parameter found; "
+                    "skipping bias calibration. Initial q_logit mean was "
+                    f"{shift:.3f} — if training stalls, the backbone may need "
+                    "a custom calibration path."
+                )
+            query_model.train()
+
+    # ── Phase 0: MLM warmup ──────────────────────────────────────────
+    # Re-train the body+head on standard masked-LM in the donor's vocabulary.
+    # The transplant gave the model new input embeddings (and tied output
+    # embeddings) but the body learned its hidden representations against
+    # the *old* vocab. For backbones whose head-body coherence doesn't survive
+    # the swap (bert-base-uncased), a few thousand steps of MLM in the new
+    # vocab re-establishes the relationship and gives alignment a healthy
+    # starting point. Default off (0) so this is opt-in per-backbone.
+    #
+    # Skipped on resume — the saved checkpoint already includes the warmed body.
+    mlm_warmup_steps = lc.get("mlm_warmup_steps", 0)
+    if mlm_warmup_steps > 0 and start_step == 0:
+        mlm_mask_rate = lc.get("mlm_mask_rate", 0.15)
+        mlm_lr        = lc.get("mlm_warmup_lr", lc.get("alignment_lr", 5e-4))
+
+        # Repurpose a Llama-3 reserved special token as our [MASK]. These
+        # never appear in normal text, so they make a clean MASK marker
+        # (vs. the previous "90% random" strategy, which had no signal that
+        # a position needed prediction). Default: <|reserved_special_token_0|>
+        # at id 128002.
+        mask_token_id = lc.get("mlm_mask_token_id", 128002)
+
+        # The transplant left cls.predictions.bias as a 128k vector where
+        # the first 30522 entries are bert's original biases for bert's
+        # token IDs (now reinterpreted as Llama-3 IDs — random misalignment)
+        # and the rest are zero. Re-zero the whole bias so MLM trains it
+        # from scratch with proper Llama-3 token statistics.
+        for name, par in query_model.mlm.named_parameters():
+            if name == "cls.predictions.bias" and par.dim() == 1 and par.shape[0] == query_model.vocab_size:
+                par.data.zero_()
+                print(f"[lion-align] Zeroed {name} (was bert-mismapped after transplant).")
+                break
+
+        print(
+            f"[lion-align] Phase 0: MLM warmup ({mlm_warmup_steps} steps, "
+            f"mask_rate={mlm_mask_rate}, lr={mlm_lr}, "
+            f"mask_token_id={mask_token_id}) …"
+        )
+
+        # MLM benefits from longer contexts; use corpus passages, not queries.
+        mlm_loader = make_alignment_loader(
+            cfg["sae"]["corpus_dataset"],
+            cfg["sae"].get("corpus_text_field", "text"),
+            query_tokenizer,
+            lc["batch_size"],
+            lc["doc_max_length"],
+            device,
+        )
+        mlm_optimizer = torch.optim.AdamW(
+            query_model.parameters(), lr=mlm_lr, weight_decay=lc["weight_decay"]
+        )
+        mlm_scaler = GradScaler(enabled=lc["fp16"] and device.type == "cuda")
+        V_qm    = query_model.vocab_size
+        pad_id  = query_tokenizer.pad_token_id
+
+        query_model.train()
+        t_mlm = time.time()
+        for mstep in range(mlm_warmup_steps):
+            ids, attn_mask, _ = next(mlm_loader)
+            # Standard BERT 80/10/10 masking strategy:
+            #   80% replaced with the MASK token  (model knows: predict here)
+            #   10% replaced with a random token  (regularises against blind copying)
+            #   10% kept unchanged                 (regularises against blind reliance on MASK)
+            rand   = torch.rand_like(ids, dtype=torch.float)
+            keep   = (ids == pad_id) | (attn_mask == 0)
+            mlm_pos = (rand < mlm_mask_rate) & ~keep
+
+            rand2  = torch.rand_like(ids, dtype=torch.float)
+            mask_action   = mlm_pos & (rand2 < 0.8)                 # → [MASK]
+            random_action = mlm_pos & (rand2 >= 0.8) & (rand2 < 0.9)  # → random token
+            # remaining 10% of mlm_pos: unchanged
+
+            random_tokens = torch.randint(0, V_qm, ids.shape, device=device)
+            input_ids_mlm = ids.clone()
+            input_ids_mlm[mask_action]   = mask_token_id
+            input_ids_mlm[random_action] = random_tokens[random_action]
+
+            labels_mlm = ids.clone()
+            labels_mlm[~mlm_pos] = -100  # ignore non-mask positions in CE
+
+            mlm_optimizer.zero_grad()
+            with autocast(enabled=lc["fp16"] and device.type == "cuda"):
+                logits_mlm = query_model.mlm(
+                    input_ids=input_ids_mlm, attention_mask=attn_mask
+                ).logits  # [B, L, V]
+                mlm_loss = F.cross_entropy(
+                    logits_mlm.reshape(-1, V_qm), labels_mlm.reshape(-1),
+                    ignore_index=-100,
+                )
+
+            mlm_scaler.scale(mlm_loss).backward()
+            if mlm_scaler.is_enabled():
+                mlm_scaler.unscale_(mlm_optimizer)
+            # Looser grad clip than the alignment phase: the post-transplant
+            # model has the *head* in essentially fresh-init state for the new
+            # vocab, so initial total grad norms are ~100. Clipping to 1.0
+            # (alignment-phase default) starves training by ~100x. Configurable
+            # via mlm_grad_clip; 10.0 is a safer default for re-pretraining.
+            mlm_grad_clip = lc.get("mlm_grad_clip", 10.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                list(query_model.parameters()), mlm_grad_clip,
+            ).item()
+            mlm_scaler.step(mlm_optimizer)
+            mlm_scaler.update()
+
+            if (mstep + 1) % lc["log_every"] == 0:
+                elapsed = time.time() - t_mlm
+                # MLM accuracy on masked positions — quick health check.
+                with torch.no_grad():
+                    pred = logits_mlm.argmax(-1)
+                    correct = ((pred == labels_mlm) & mlm_pos).float().sum()
+                    total = mlm_pos.float().sum().clamp(min=1.0)
+                    acc = (correct / total).item()
+                print(
+                    f"[lion-align/mlm] step {mstep+1:>6} | loss {mlm_loss.item():.4f} "
+                    f"| acc {acc:.3f} | gnorm {grad_norm:.1f} "
+                    f"| masked/batch {int(mlm_pos.sum().item())} | {elapsed:.0f}s"
+                )
+                writer.add_scalar("lion_transplant_align/mlm/loss", mlm_loss.item(), mstep + 1)
+                writer.add_scalar("lion_transplant_align/mlm/acc", acc, mstep + 1)
+                t_mlm = time.time()
+
+        del mlm_loader, mlm_optimizer, mlm_scaler
+        import gc; gc.collect(); torch.cuda.empty_cache()
+        print("[lion-align] Phase 0 complete; alignment optimiser starts fresh from here.")
+
     # ── Initial eval: doc-doc ceiling (Lion both sides) ──────────────
     if start_step == 0 and cfg.get("eval", {}).get("datasets"):
         print("[lion-align] Initial eval — doc_doc ceiling + query_doc baseline …")
@@ -1504,6 +1695,10 @@ def train_lion_transplant_align(cfg: dict, resume: str | None = None):
             writer=writer, step=0, run_doc_doc=True, override_k=0,
             section="lion_transplant_align",
         )
+        # Eval encodes thousands of docs through Lion-SP-1B in fp16; the caching
+        # allocator holds that memory by default and the training loop OOMs when
+        # it tries to allocate its own activations on top. Force a release here.
+        import gc; gc.collect(); torch.cuda.empty_cache()
 
     # ── Training loop ─────────────────────────────────────────────────
     query_model.train()
@@ -1522,30 +1717,100 @@ def train_lion_transplant_align(cfg: dict, resume: str | None = None):
         in_kd_phase = step < kd_warmup_steps
 
         with autocast(enabled=lc["fp16"] and device.type == "cuda"):
+            # Single forward + single Lion forward, both phases.
+            _raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits
+            _mask = a_mask.unsqueeze(-1).float()
+            q_logits = (_raw + (1.0 - _mask) * -1e6).max(dim=1).values
+            d_logits = lion_doc.encode_logits(texts, lc["query_max_length"]).to(q_logits.dtype)
+            q_vecs = torch.log1p(torch.relu(q_logits))
+
             if in_kd_phase:
-                _raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits
-                _mask = a_mask.unsqueeze(-1).float()
-                q_logits = (_raw + (1.0 - _mask) * -1e6).max(dim=1).values
-                d_logits = lion_doc.encode_logits(texts, lc["query_max_length"]).to(q_logits.dtype)
+                # Plain softmax KD: warm the model into Lion's logit-shape basin.
+                # Note: shift-invariant — the model's logit offset is unconstrained,
+                # which is why we don't end the KD phase using post-relu metrics.
                 T = kd_temperature
                 align_loss = F.kl_div(
                     F.log_softmax(q_logits / T, dim=-1),
                     F.softmax(d_logits / T, dim=-1),
                     reduction="batchmean",
                 ) * T ** 2
-                with torch.no_grad():
-                    q_vecs = query_model.encode(a_ids, a_mask)
             else:
-                q_vecs = query_model.encode(a_ids, a_mask)
-                d_vecs = lion_doc.encode(texts, lc["query_max_length"], no_grad=True)
-                align_loss = (1.0 - F.cosine_similarity(q_vecs, d_vecs.to(q_vecs.dtype))).mean()
-                if lambda_q > 0.0:
-                    cos_step = step - kd_warmup_steps
-                    flops_scale = min(1.0, cos_step / flops_warmup) if flops_warmup > 0 else 1.0
-                    flops_loss = q_vecs.abs().sum(dim=-1).mean()
-                    align_loss = align_loss + flops_scale * lambda_q * flops_loss
+                # Two alignment-loss formulations are available, switched by
+                # the `align_loss_kind` config knob:
+                #
+                # "cos_kl" (default for ettin-150m): cosine on SPLADE vectors
+                # + softmax-KL on raw logits. Works when the body's natural
+                # post-transplant logits already line up roughly with Lion's
+                # active set (true for ModernBERT/ettin). Fails on bert-base
+                # / roberta-base because cos has zero gradient through the
+                # relu and KL is shift-invariant — once q_logits drift to
+                # all-negative, every gradient on the offset axis is zero
+                # and the model is stuck at q_nnz=0, loss=1.
+                #
+                # "bce_logits" (recommended for bert/roberta): BCE-with-logits
+                # against the BINARY support of Lion (target = (d_logits > 0)).
+                # Operates on raw q_logits → no relu trap. Not shift-invariant
+                # → real force on the offset axis. pos_weight balances the
+                # ~300:128k class imbalance. Crucially uses BINARY targets
+                # (0 or 1), not sigmoid(d_logits), to avoid the soft-target
+                # arithmetic blowup we hit earlier where borderline tokens
+                # got upweighted into runaway density.
+                kind = lc.get("align_loss_kind", "cos_kl")
+                if kind == "bce_logits" or kind == "bce_cos":
+                    target = (d_logits > 0).float()
+                    pw_override = lc.get("bce_pos_weight")
+                    if pw_override is None:
+                        with torch.no_grad():
+                            n_pos = target.sum().clamp(min=1.0)
+                            n_neg = (1.0 - target).sum()
+                            pos_weight = (n_neg / n_pos).clamp(max=2000.0).to(q_logits.dtype)
+                    else:
+                        pos_weight = torch.tensor(
+                            float(pw_override), device=q_logits.device, dtype=q_logits.dtype
+                        )
+                    bce_loss = F.binary_cross_entropy_with_logits(
+                        q_logits, target, pos_weight=pos_weight
+                    )
+                    if kind == "bce_cos":
+                        # BCE handles the binary support (escapes dead-relu);
+                        # cos refines magnitudes & tightens the support. Once
+                        # BCE has pulled q_vec away from zero, cos's gradient
+                        # through the relu is alive and useful.
+                        cos_loss = (
+                            1.0 - F.cosine_similarity(
+                                q_vecs, torch.log1p(torch.relu(d_logits))
+                            )
+                        ).mean()
+                        cos_coeff = lc.get("cos_coeff", 1.0)
+                        align_loss = bce_loss + cos_coeff * cos_loss
+                    else:
+                        align_loss = bce_loss
+                else:  # "cos_kl"
+                    cos_loss = (
+                        1.0 - F.cosine_similarity(q_vecs, torch.log1p(torch.relu(d_logits)))
+                    ).mean()
+                    T = kd_temperature
+                    kl_loss = F.kl_div(
+                        F.log_softmax(q_logits / T, dim=-1),
+                        F.softmax(d_logits / T, dim=-1),
+                        reduction="batchmean",
+                    ) * T ** 2
+                    kl_coeff = lc.get("kl_coeff", 1.0)
+                    align_loss = cos_loss + kl_coeff * kl_loss
+
+            # FLOPs in both phases. Squared-mean form: gradient ∝ activation,
+            # gives stable soft sparsity. Without this in the KD phase, the
+            # warmup ends with q_nnz ~90k (very dense) and the next phase has
+            # to do drastic sparsification, which destabilises training.
+            if lambda_q > 0.0:
+                flops_scale = min(1.0, step / max(flops_warmup, 1)) if flops_warmup > 0 else 1.0
+                flops_loss = (q_vecs.mean(dim=0) ** 2).sum()
+                align_loss = align_loss + flops_scale * lambda_q * flops_loss
 
         q_vecs_log = q_vecs.detach()
+        # Lion's SPLADE vector for the same query texts — for d_nnz / d_flops
+        # logging only (no gradient, computed alongside d_logits at no extra cost).
+        d_vecs_log = torch.log1p(torch.relu(d_logits.detach()))
         accum_loss += align_loss.item()
         scaler.scale(align_loss / grad_accum).backward()
 
@@ -1564,14 +1829,20 @@ def train_lion_transplant_align(cfg: dict, resume: str | None = None):
             lr = optimizer.param_groups[0]["lr"]
             phase = "kd" if in_kd_phase else "cos"
             q_nnz = (q_vecs_log > 0).float().mean(0).sum().item()
-            flops_val = q_vecs_log.abs().sum(dim=-1).mean().item() if not in_kd_phase else 0.0
+            d_nnz = (d_vecs_log > 0).float().mean(0).sum().item()
+            flops_val = q_vecs_log.abs().sum(dim=-1).mean().item()
+            d_flops_val = d_vecs_log.abs().sum(dim=-1).mean().item()
             print(
                 f"[lion-align/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} | "
-                f"q_nnz {q_nnz:.1f} | flops {flops_val:.1f} | lr {lr:.2e} | {elapsed:.0f}s"
+                f"q_nnz {q_nnz:.1f} (lion {d_nnz:.1f}) | "
+                f"flops {flops_val:.1f} (lion {d_flops_val:.1f}) | "
+                f"lr {lr:.2e} | {elapsed:.0f}s"
             )
             writer.add_scalar(f"lion_transplant_align/{phase}/loss", align_loss.item(), step + 1)
             writer.add_scalar("lion_transplant_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("lion_transplant_align/d_nnz", d_nnz, step + 1)
             writer.add_scalar("lion_transplant_align/flops_q", flops_val, step + 1)
+            writer.add_scalar("lion_transplant_align/flops_d", d_flops_val, step + 1)
             writer.add_scalar("lion_transplant_align/lr", lr, step + 1)
             t0 = time.time()
 
@@ -1591,6 +1862,11 @@ def train_lion_transplant_align(cfg: dict, resume: str | None = None):
                     section="lion_transplant_align",
                 )
                 query_model.train()
+                # Eval encodes thousands of docs through Lion-SP-1B in fp16; the
+                # caching allocator holds that memory by default, so the next
+                # training step OOMs trying to allocate activations on top.
+                gc.collect()
+                torch.cuda.empty_cache()
 
     # ── Final save ────────────────────────────────────────────────────
     final_path = out_dir / "align_final.pt"
@@ -2216,6 +2492,496 @@ def _save_splade(model, optimizer, scheduler, step, path):
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
+def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: str | None = None):
+    """Layer-truncated SPLADE query encoder, distilled against the full doc encoder.
+
+    Both encoders share tokenizer, embeddings, and MLM head. Only the body is
+    shallower on the query side. This avoids every cross-architecture mismatch
+    that hits the vocab-transplant approaches (vocab overlap, BPE convention,
+    head alignment): the query model is literally the doc model with later
+    layers chopped off.
+
+    Two-phase training:
+      Phase 0 — frozen warmup: only the kept body layers update. Embeddings and
+        head stay pinned at the doc encoder's values, giving the body a stable
+        target distribution to adapt to.
+      Phase 1 — full fine-tuning: everything trainable.
+
+    Loss is the same cos + softmax-KL recipe that worked for ettin's
+    vocab_transplant_align: cosine on the SPLADE vectors plus a small KL on
+    raw max-pooled logits as a recovery gradient. Reads its config from the
+    ``splade_shallow_align`` section.
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    import torch.nn.functional as F
+
+    from model import FrozenDocSPLADE, ShallowSpladeQuery
+    from eval import evaluate_asymmetric
+    from data import make_ranking_distill_loader
+
+    if "splade_shallow_align" not in cfg:
+        raise SystemExit("[shallow] config.yaml is missing a `splade_shallow_align:` section.")
+    sc = cfg["splade_shallow_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    n_layers            = int(sc["n_layers"])
+    alignment_steps     = int(sc.get("alignment_steps", 50_000))
+    freeze_warmup_steps = int(sc.get("freeze_warmup_steps", 10_000))
+    align_lr            = float(sc.get("alignment_lr", 5e-4))
+    weight_decay        = float(sc.get("weight_decay", 0.01))
+    fp16                = bool(sc.get("fp16", True))
+    kd_temperature        = float(sc.get("kd_temperature", 1.0))
+    lambda_q              = float(sc.get("lambda_q", 0.0))
+    lambda_q_warmup_steps = int(sc.get("lambda_q_warmup_steps", 0))
+    nway                  = int(sc.get("nway", 8))
+    grad_accum          = int(sc.get("gradient_accumulation_steps", 1))
+    if alignment_steps <= 0:
+        raise SystemExit("[shallow] alignment_steps must be > 0.")
+    if freeze_warmup_steps < 0 or freeze_warmup_steps > alignment_steps:
+        raise SystemExit("[shallow] freeze_warmup_steps must be in [0, alignment_steps].")
+
+    print(
+        f"[shallow] doc={sc['doc_splade_hf_id']} | n_layers={n_layers} "
+        f"| freeze_warmup={freeze_warmup_steps} | alignment={alignment_steps} "
+        f"| lr={align_lr} | nway={nway} | lambda_q={lambda_q} "
+        f"| T={kd_temperature} | grad_accum={grad_accum}"
+    )
+
+    # ── Models ────────────────────────────────────────────────────────
+    print(f"[shallow] Loading frozen doc SPLADE: {sc['doc_splade_hf_id']} …")
+    doc_splade = FrozenDocSPLADE(sc["doc_splade_hf_id"]); doc_splade.to(device); doc_splade.eval()
+
+    print(f"[shallow] Building shallow query model from same checkpoint, keeping {n_layers} layers …")
+    query_model = ShallowSpladeQuery(sc["doc_splade_hf_id"], n_layers=n_layers); query_model.to(device)
+    query_tokenizer = query_model.tokenizer
+    n_total = sum(p.numel() for p in query_model.parameters())
+    n_trainable_full = n_total
+    print(
+        f"[shallow] Query model params (after truncation): {n_total/1e6:.1f}M "
+        f"(was {query_model.original_n_layers}-layer original); will freeze "
+        "embeddings + head during warmup."
+    )
+
+    # ── Resume / init ─────────────────────────────────────────────────
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = int(ckpt.get("step", 0))
+        print(f"[shallow] Resumed from {resume} at step {start_step}")
+    elif init_from:
+        ckpt = torch.load(init_from, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        print(f"[shallow] Initialised weights from {init_from} (step counter reset to 0)")
+
+    # ── Initial trainability based on phase at start_step ─────────────
+    in_warmup = start_step < freeze_warmup_steps
+    if in_warmup:
+        query_model.freeze_for_warmup()
+        print(f"[shallow] Phase 0 (frozen warmup). Trainable params: "
+              f"{query_model.trainable_param_count()/1e6:.1f}M / {n_trainable_full/1e6:.1f}M total.")
+    else:
+        query_model.unfreeze_all()
+        print(f"[shallow] Resuming directly into Phase 1 (everything trainable).")
+
+    # ── Optimiser / scheduler / scaler ────────────────────────────────
+    # Initial optimiser only has the warmup-phase parameters; we'll rebuild it
+    # at the phase boundary so the new (now trainable) tensors have AdamW state.
+    optimizer = torch.optim.AdamW(
+        [p for p in query_model.parameters() if p.requires_grad],
+        lr=align_lr, weight_decay=weight_decay,
+    )
+    # CosineAnnealingLR needs initial_lr in param_groups when last_epoch > -1
+    # (i.e. when resuming mid-run without a saved optimizer state).
+    if start_step > 0:
+        for pg in optimizer.param_groups:
+            pg["initial_lr"] = align_lr
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=alignment_steps, eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=fp16 and device.type == "cuda")
+
+    out_dir = _model_ckpt_root(sc["doc_splade_hf_id"]) / sc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    ranking_loader = make_ranking_distill_loader(
+        nway=nway, batch_size=sc["batch_size"],
+    )
+
+    # ── Initial eval ──────────────────────────────────────────────────
+    if start_step == 0 and cfg.get("eval", {}).get("datasets"):
+        print("[shallow] Initial eval — doc_doc ceiling + query_doc baseline …")
+        import gc; gc.collect(); torch.cuda.empty_cache()
+        evaluate_asymmetric(
+            query_model, query_tokenizer, doc_splade, cfg, device,
+            writer=writer, step=0, run_doc_doc=True, override_k=0,
+            section="splade_shallow_align",
+        )
+        gc.collect(); torch.cuda.empty_cache()
+
+    # ── Training loop ─────────────────────────────────────────────────
+    query_model.train()
+    t0 = time.time()
+    print(f"[shallow] Training loop ({alignment_steps - start_step} steps remaining) …")
+    optimizer.zero_grad()
+
+    for step in range(start_step, alignment_steps):
+        # ── Phase boundary: unfreeze everything ───────────────────────
+        if in_warmup and step >= freeze_warmup_steps:
+            query_model.unfreeze_all()
+            current_lr = optimizer.param_groups[0]["lr"]
+            head_lr_scale = float(sc.get("head_lr_scale", 0.1))
+            # Two param groups: body layers at full LR, embeddings + MLM head at
+            # a fraction. This prevents co-adaptation instability right after unfreeze.
+            body_params = list(query_model.mlm.bert.encoder.layer.parameters())
+            body_ids = {id(p) for p in body_params}
+            head_params = [p for p in query_model.parameters() if id(p) not in body_ids]
+            optimizer = torch.optim.AdamW([
+                {"params": body_params, "lr": current_lr},
+                {"params": head_params, "lr": current_lr * head_lr_scale},
+            ], weight_decay=weight_decay)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=alignment_steps - freeze_warmup_steps, eta_min=1e-5,
+            )
+            optimizer.zero_grad()
+            in_warmup = False
+            print(
+                f"[shallow] Step {step}: switched to Phase 1. "
+                f"body_lr={current_lr:.2e} head_lr={current_lr * head_lr_scale:.2e}"
+            )
+
+        do_log = (step + 1) % sc["log_every"] == 0
+        q_texts, p_texts = next(ranking_loader)
+        B_actual = len(q_texts)
+        q_enc = query_tokenizer(
+            q_texts, max_length=sc["query_max_length"],
+            truncation=True, padding=True, return_tensors="pt",
+        )
+        a_ids = q_enc["input_ids"].to(device)
+        a_mask = q_enc["attention_mask"].to(device)
+
+        with torch.no_grad():
+            # Teacher query vecs needed every step for the loss.
+            t_q_vecs = doc_splade.encode(q_texts, sc["query_max_length"]).float()  # [B, V]
+            # Passage vecs only needed for p@1 logging — skip on non-log steps.
+            # Encode in chunks to avoid OOM when training batch_size is large.
+            if do_log:
+                enc_bs = sc.get("eval_batch_size", 32)
+                p_vecs = torch.cat([
+                    doc_splade.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
+                    for i in range(0, len(p_texts), enc_bs)
+                ], dim=0)
+                p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+                t_scores = (t_q_vecs.unsqueeze(1) * p_vecs_3d).sum(-1)  # [B, nway]
+
+        with autocast(enabled=fp16 and device.type == "cuda"):
+            _raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits  # [B, L, V]
+            _m = a_mask.unsqueeze(-1).float()
+            q_logits = (_raw + (1.0 - _m) * -1e6).max(dim=1).values  # [B, V]
+
+            # STE: forward uses real SPLADE vecs (scale matches teacher),
+            # backward treats ReLU as identity so gradient reaches dead dims.
+            q_relu = q_logits + (F.relu(q_logits) - q_logits).detach()
+            q_vecs = torch.log1p(q_relu)
+
+            # Direct vector MSE against teacher SPLADE query vecs.
+            # Sum over vocab dims, mean over batch — keeps per-dim gradient at O(1/B)
+            # instead of O(1/(B*V)), which is strong enough to revive dead dims from zero.
+            rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+            align_loss = rank_loss
+            if lambda_q > 0.0:
+                lq_scale = min(1.0, step / lambda_q_warmup_steps) if lambda_q_warmup_steps > 0 else 1.0
+                align_loss = align_loss + lq_scale * lambda_q * q_vecs.sum(-1).mean()
+
+        is_accum_boundary = (step + 1) % grad_accum == 0 or (step + 1) == alignment_steps
+        scaler.scale(align_loss / grad_accum).backward()
+        if is_accum_boundary:
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in query_model.parameters() if p.requires_grad], 1.0
+            )
+            scaler.step(optimizer); scaler.update(); scheduler.step()
+            optimizer.zero_grad()
+
+        if do_log:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            phase = "warm" if step < freeze_warmup_steps else "full"
+            with torch.no_grad():
+                q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+                t_nnz = (t_q_vecs > 0).float().mean(0).sum().item()
+                flops = q_vecs.detach().abs().sum(-1).mean().item()
+                p_f = p_vecs_3d.to(q_vecs.dtype)
+                s_scores = (q_vecs.unsqueeze(1) * p_f).sum(-1)
+                t_rank1 = t_scores.argmax(-1).eq(0).float().mean().item()
+                s_rank1 = s_scores.argmax(-1).eq(0).float().mean().item()
+            print(
+                f"[shallow/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} "
+                f"(rank {rank_loss.item():.3f}) | "
+                f"q_nnz {q_nnz:.1f} (teacher {t_nnz:.1f}) | flops {flops:.1f} | "
+                f"p@1 s={s_rank1:.2f} t={t_rank1:.2f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar(f"splade_shallow_align/{phase}/loss", align_loss.item(), step + 1)
+            writer.add_scalar(f"splade_shallow_align/{phase}/rank_loss", rank_loss.item(), step + 1)
+            writer.add_scalar("splade_shallow_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("splade_shallow_align/teacher_nnz", t_nnz, step + 1)
+            writer.add_scalar("splade_shallow_align/precision_at_1", s_rank1, step + 1)
+            writer.add_scalar("splade_shallow_align/lr", lr, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % sc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if cfg.get("eval", {}).get("datasets"):
+                print(f"[shallow] Eval at step {step+1} …")
+                import gc; gc.collect(); torch.cuda.empty_cache()
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="splade_shallow_align",
+                )
+                query_model.train()
+                gc.collect(); torch.cuda.empty_cache()
+
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
+    print(f"[shallow] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_lion_shallow_align(cfg: dict, resume: str | None = None):
+    """3-layer (or N-layer) Lion-SP-1B query encoder distilled against the full Lion doc encoder.
+
+    Same recipe as train_splade_shallow_align but for Lion-SP-1B (Llama-3 decoder-only):
+      - Phase 0: freeze embeddings + LM head, train only the kept body layers.
+      - Phase 1: everything trains; head+embeddings at head_lr_scale * body_lr.
+      - Loss: direct MSE on SPLADE vectors + L1 sparsity (lambda_q), STE through relu.
+
+    Reads from the ``lion_shallow_align`` config section.
+    """
+    import gc
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    import torch.nn.functional as F
+
+    from model import FrozenLionSPLADE, ShallowLionQuery
+    from eval import evaluate_asymmetric
+    from data import make_ranking_distill_loader
+
+    if "lion_shallow_align" not in cfg:
+        raise SystemExit("[lion-shallow] config.yaml is missing a `lion_shallow_align:` section.")
+    sc = cfg["lion_shallow_align"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    n_layers            = int(sc["n_layers"])
+    alignment_steps     = int(sc.get("alignment_steps", 50_000))
+    freeze_warmup_steps = int(sc.get("freeze_warmup_steps", 5_000))
+    head_lr_scale       = float(sc.get("head_lr_scale", 0.1))
+    align_lr            = float(sc.get("alignment_lr", 2e-4))
+    weight_decay        = float(sc.get("weight_decay", 0.01))
+    fp16                = bool(sc.get("fp16", True))
+    lambda_q              = float(sc.get("lambda_q", 0.0))
+    lambda_q_warmup_steps = int(sc.get("lambda_q_warmup_steps", 0))
+    nway                  = int(sc.get("nway", 8))
+    grad_accum          = int(sc.get("gradient_accumulation_steps", 1))
+
+    print(
+        f"[lion-shallow] lion={sc['lion_hf_id']} | n_layers={n_layers} "
+        f"| freeze_warmup={freeze_warmup_steps} | alignment={alignment_steps} "
+        f"| lr={align_lr} | head_lr_scale={head_lr_scale} "
+        f"| nway={nway} | lambda_q={lambda_q} | grad_accum={grad_accum}"
+    )
+
+    print(f"[lion-shallow] Loading frozen Lion doc encoder …")
+    lion_doc = FrozenLionSPLADE(sc["lion_hf_id"]); lion_doc.to(device); lion_doc.eval()
+
+    print(f"[lion-shallow] Building {n_layers}-layer shallow Lion query encoder …")
+    query_model = ShallowLionQuery(sc["lion_hf_id"], n_layers=n_layers)
+    query_model.to(device)
+    query_tokenizer = query_model.tokenizer
+    n_total = sum(p.numel() for p in query_model.parameters())
+    print(
+        f"[lion-shallow] Query model: {n_total/1e6:.1f}M params "
+        f"({n_layers}/{query_model.original_n_layers} layers kept)."
+    )
+
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = int(ckpt.get("step", 0))
+        print(f"[lion-shallow] Resumed from {resume} at step {start_step}")
+
+    in_warmup = start_step < freeze_warmup_steps
+    if in_warmup:
+        query_model.freeze_for_warmup()
+        print(
+            f"[lion-shallow] Phase 0 (frozen warmup). Trainable: "
+            f"{query_model.trainable_param_count()/1e6:.1f}M / {n_total/1e6:.1f}M"
+        )
+    else:
+        query_model.unfreeze_all()
+        print(f"[lion-shallow] Resuming directly into Phase 1.")
+
+    optimizer = torch.optim.AdamW(
+        [p for p in query_model.parameters() if p.requires_grad],
+        lr=align_lr, weight_decay=weight_decay,
+    )
+    if start_step > 0:
+        for pg in optimizer.param_groups:
+            pg["initial_lr"] = align_lr
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=alignment_steps, eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    # bfloat16 has the same exponent range as float32; no loss scaling needed.
+    scaler = GradScaler(enabled=False)
+    use_bf16 = fp16 and device.type == "cuda"
+
+    out_dir = Path("checkpoints_lion_shallow") / sc.get("output_dir", "lion_shallow_align")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    ranking_loader = make_ranking_distill_loader(nway=nway, batch_size=sc["batch_size"])
+
+    # Initial eval
+    print(f"[lion-shallow] Initial eval …")
+    query_model.eval()
+    evaluate_asymmetric(
+        query_model, query_tokenizer, lion_doc, cfg, device,
+        writer=writer, step=0, run_doc_doc=True, override_k=0,
+        section="lion_shallow_align",
+    )
+    gc.collect(); torch.cuda.empty_cache()
+
+    query_model.train()
+    t0 = time.time()
+    print(f"[lion-shallow] Training loop ({alignment_steps - start_step} steps remaining) …")
+    optimizer.zero_grad()
+
+    for step in range(start_step, alignment_steps):
+        # ── Phase boundary ────────────────────────────────────────────
+        if in_warmup and step >= freeze_warmup_steps:
+            # embed_tokens and lm_head are tied (262M shared params). Unfreezing
+            # them adds ~1GB of AdamW states which OOMs on 8GB GPUs. Only add the
+            # final layer norm — it's tiny and lets the body-to-head interface adapt.
+            for p in query_model.model.model.norm.parameters():
+                p.requires_grad_(True)
+            current_lr = optimizer.param_groups[0]["lr"]
+            optimizer = torch.optim.AdamW(
+                [p for p in query_model.parameters() if p.requires_grad],
+                lr=current_lr, weight_decay=weight_decay,
+            )
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=alignment_steps - freeze_warmup_steps, eta_min=1e-5,
+            )
+            optimizer.zero_grad()
+            in_warmup = False
+            print(f"[lion-shallow] Step {step}: switched to Phase 1 (body + norm). lr={current_lr:.2e}")
+
+        do_log = (step + 1) % sc["log_every"] == 0
+        q_texts, p_texts = next(ranking_loader)
+        B_actual = len(q_texts)
+        q_enc = query_tokenizer(
+            q_texts, max_length=sc["query_max_length"],
+            truncation=True, padding=True, return_tensors="pt",
+        )
+        a_ids = q_enc["input_ids"].to(device)
+        a_mask = q_enc["attention_mask"].to(device)
+
+        with torch.no_grad():
+            t_q_vecs = lion_doc.encode(q_texts, sc["query_max_length"]).float()
+            if do_log:
+                enc_bs = sc.get("eval_batch_size", 8)
+                p_vecs = torch.cat([
+                    lion_doc.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
+                    for i in range(0, len(p_texts), enc_bs)
+                ], dim=0)
+                p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+                t_scores = (t_q_vecs.unsqueeze(1) * p_vecs_3d).sum(-1)
+
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            _raw = query_model.model(
+                input_ids=a_ids, attention_mask=a_mask, use_cache=False
+            ).logits  # [B, L, V]
+            scale = query_model.hidden_size ** -0.25
+            _m = a_mask.unsqueeze(-1).float()
+            q_logits = (_raw * scale + (1.0 - _m) * -1e6).max(dim=1).values  # [B, V]
+
+            # STE: forward = real SPLADE vecs, backward = identity through relu
+            q_relu = q_logits + (F.relu(q_logits) - q_logits).detach()
+            q_vecs = torch.log1p(q_relu)
+
+            rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+            align_loss = rank_loss
+            if lambda_q > 0.0:
+                lq_scale = min(1.0, step / lambda_q_warmup_steps) if lambda_q_warmup_steps > 0 else 1.0
+                align_loss = align_loss + lq_scale * lambda_q * q_vecs.sum(-1).mean()
+
+        is_accum_boundary = (step + 1) % grad_accum == 0 or (step + 1) == alignment_steps
+        scaler.scale(align_loss / grad_accum).backward()
+        if is_accum_boundary:
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in query_model.parameters() if p.requires_grad], 1.0
+            )
+            scaler.step(optimizer); scaler.update(); scheduler.step()
+            optimizer.zero_grad()
+
+        if do_log:
+            with torch.no_grad():
+                q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+                t_nnz = (t_q_vecs > 0).float().mean(0).sum().item()
+                flops = q_vecs.detach().sum(-1).mean().item()
+                lr = optimizer.param_groups[0]["lr"]
+                phase = "warm" if in_warmup else "full"
+                if do_log and p_texts:
+                    s_scores = (q_vecs.detach().float().unsqueeze(1) * p_vecs_3d.to(q_vecs.dtype)).sum(-1)
+                    s_rank1 = (s_scores.argmax(-1) == 0).float().mean().item()
+                    t_rank1 = (t_scores.argmax(-1) == 0).float().mean().item()
+                else:
+                    s_rank1 = t_rank1 = float("nan")
+            elapsed = time.time() - t0; t0 = time.time()
+            print(
+                f"[lion-shallow/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} "
+                f"(rank {rank_loss.item():.3f}) | q_nnz {q_nnz:.1f} (teacher {t_nnz:.1f}) "
+                f"| flops {flops:.1f} | p@1 s={s_rank1:.2f} t={t_rank1:.2f} "
+                f"| lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar("lion_shallow_align/loss", align_loss.item(), step + 1)
+            writer.add_scalar("lion_shallow_align/rank_loss", rank_loss.item(), step + 1)
+            writer.add_scalar("lion_shallow_align/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("lion_shallow_align/teacher_nnz", t_nnz, step + 1)
+            writer.add_scalar("lion_shallow_align/lr", lr, step + 1)
+
+        if (step + 1) % sc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            query_model.eval()
+            evaluate_asymmetric(
+                query_model, query_tokenizer, lion_doc, cfg, device,
+                writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                section="lion_shallow_align",
+            )
+            query_model.train()
+            gc.collect(); torch.cuda.empty_cache()
+
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
+    print(f"[lion-shallow] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train SAE-SPLADE with ettin-17m")
     parser.add_argument(
@@ -2224,11 +2990,14 @@ def main():
             "sae", "splade", "asymmetric", "projected",
             "vocab_transplant", "vocab_transplant_align", "lion_transplant_align",
             "random_init_align", "doc_head_align", "direct_align",
+            "splade_shallow_align", "lion_shallow_align",
         ],
         help="Training stage to run.",
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from")
+    parser.add_argument("--init-from", default=None, dest="init_from",
+                        help="Load model weights from checkpoint but reset step counter to 0")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -2252,6 +3021,10 @@ def main():
         train_doc_head_align(cfg, resume=args.resume)
     elif args.stage == "direct_align":
         train_direct_align(cfg, resume=args.resume)
+    elif args.stage == "splade_shallow_align":
+        train_splade_shallow_align(cfg, resume=args.resume, init_from=args.init_from)
+    elif args.stage == "lion_shallow_align":
+        train_lion_shallow_align(cfg, resume=args.resume)
     else:
         train_vocab_transplant(cfg, resume=args.resume)
 

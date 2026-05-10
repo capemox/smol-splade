@@ -212,7 +212,8 @@ def indexed_retrieve(
 
     Q = len(query_vecs_cpu)
     # Queries live on GPU as dense fp16 — small (~430MB) and reused for every chunk.
-    q_gpu = query_vecs_cpu.half().to(device)
+    # Caller should already pass fp16 and have freed the fp32 copy.
+    q_gpu = query_vecs_cpu.to(device) if query_vecs_cpu.dtype == torch.float16 else query_vecs_cpu.half().to(device)
 
     top_scores = torch.full((Q, topk), float("-inf"), device=device, dtype=torch.float16)
     # Track docids as integer slot positions into a flat list we accumulate.
@@ -328,13 +329,38 @@ def mrr_at_k(ranked, qrels, query_ids, k=10):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
+    """Load a shallow query model (ShallowSpladeQuery or ShallowLionQuery) from a checkpoint."""
+    import torch
+    if stage == "splade_shallow_align":
+        from model import ShallowSpladeQuery
+        hf_id = sc["doc_splade_hf_id"]
+        print(f"Loading ShallowSpladeQuery ({sc['n_layers']} layers) from {checkpoint} ...")
+        model = ShallowSpladeQuery(hf_id, sc["n_layers"])
+    else:
+        from model import ShallowLionQuery
+        hf_id = sc["lion_hf_id"]
+        print(f"Loading ShallowLionQuery ({sc['n_layers']} layers) from {checkpoint} ...")
+        model = ShallowLionQuery(hf_id, sc["n_layers"])
+    ckpt = torch.load(checkpoint, map_location="cpu")
+    model.load_state_dict(ckpt["model"])
+    model.to(device).eval()
+    print(f"  Step: {ckpt.get('step', 'unknown')}")
+    return model, model.tokenizer
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Full MSMARCO dev eval for VocabTransplant models"
+        description="Full MSMARCO dev eval for VocabTransplant / shallow models"
     )
     parser.add_argument("--checkpoint", default=None, help="Path to .pt checkpoint file (not needed with --doc_only)")
     parser.add_argument("--doc_only", action="store_true", help="Benchmark doc encoder on both queries and docs (upper-bound ceiling)")
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument(
+        "--stage", default="vocab_transplant",
+        choices=["vocab_transplant", "splade_shallow_align", "lion_shallow_align"],
+        help="Model type to evaluate (selects config section and model class)",
+    )
     parser.add_argument(
         "--doc_batch_size", type=int, default=128,
         help="Passages encoded per GPU call (lower = less VRAM per call)",
@@ -369,7 +395,6 @@ def main():
     import yaml
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-    vc = cfg["vocab_transplant"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -377,98 +402,205 @@ def main():
     if not args.doc_only and args.checkpoint is None:
         parser.error("--checkpoint is required unless --doc_only is set")
 
-    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
-    from transformers import AutoTokenizer
-
-    print(f"Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} ...")
-    doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
-    doc_splade.to(device)
-    doc_splade.eval()
-
     query_ids, query_texts, qrels = load_dev_queries_and_qrels()
 
-    if args.doc_only:
-        print(f"Encoding {len(query_texts)} dev queries with doc SPLADE (ceiling) ...")
-        query_vecs = encode_queries_with_doc_splade(
-            doc_splade, query_texts, vc["query_max_length"], args.encode_batch_size,
-        )
-        ckpt_label = f"{vc['doc_splade_hf_id']} (doc_only ceiling)"
-    else:
-        # Mirror train.py: vc["transplant_dir"] is a name resolved under the
-        # query model's checkpoint root (Path("checkpoints_" + last segment of
-        # query_hf_id) / vc["transplant_dir"]). Keeps train and eval in sync.
-        transplant_dir = str(
-            Path(f"checkpoints_{vc['query_hf_id'].split('/')[-1]}")
-            / vc["transplant_dir"]
-        )
-        if not Path(transplant_dir, "config.json").exists():
-            raise SystemExit(
-                f"Transplant directory not found: {transplant_dir}\n"
-                f"Expected layout (matches train.py): "
-                f"checkpoints_<query_model>/{vc['transplant_dir']}/config.json\n"
-                f"Check vocab_transplant.query_hf_id and vocab_transplant.transplant_dir in config.yaml."
+    # ── Stage-specific model + config setup ───────────────────────────────────
+    if args.stage in ("splade_shallow_align", "lion_shallow_align"):
+        sc = cfg[args.stage]
+        query_max_length = sc["query_max_length"]
+        doc_max_length = sc["doc_max_length"]
+
+        if args.stage == "splade_shallow_align":
+            from model import FrozenDocSPLADE
+            doc_hf_id = sc["doc_splade_hf_id"]
+            print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
+            doc_splade = FrozenDocSPLADE(doc_hf_id)
+            # Can use full index (same splade-v3 vocab)
+            has_index = args.max_corpus_size == 0
+        else:
+            from model import FrozenLionSPLADE
+            doc_hf_id = sc["lion_hf_id"]
+            print(f"Loading frozen Lion doc encoder: {doc_hf_id} ...")
+            doc_splade = FrozenLionSPLADE(doc_hf_id)
+            # No index exists for Lion's 128K vocab — force subset mode
+            has_index = False
+            if args.max_corpus_size == 0:
+                print("  [lion] No pre-built index for Lion (128K vocab). Defaulting to 200k subset.")
+                args.max_corpus_size = 200_000
+
+        doc_splade.to(device).eval()
+
+        if args.doc_only:
+            print(f"Encoding {len(query_texts)} dev queries with doc encoder (ceiling) ...")
+            query_vecs = encode_queries_with_doc_splade(
+                doc_splade, query_texts, query_max_length, args.encode_batch_size,
             )
-        print(f"Loading query model from {args.checkpoint} (architecture: {transplant_dir}) ...")
-        query_model = VocabTransplantQuerySPLADE(transplant_dir)
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-        query_model.load_state_dict(ckpt["model"])
-        query_model.to(device)
-        query_model.eval()
-        query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
-        print(f"  Checkpoint step: {ckpt.get('step', 'unknown')}")
+            ckpt_label = f"{doc_hf_id} (doc_only ceiling)"
+        else:
+            query_model, query_tokenizer = _load_shallow_query_model(
+                args.stage, sc, args.checkpoint, device,
+            )
+            print(f"Encoding {len(query_texts)} dev queries ...")
+            query_vecs = encode_queries(
+                query_model, query_tokenizer, query_texts,
+                query_max_length, args.encode_batch_size, device,
+            )
+            query_model.cpu()
+            torch.cuda.empty_cache()
+            del query_model
+            import gc; gc.collect()
+            ckpt_label = args.checkpoint
 
-        print(f"Encoding {len(query_texts)} dev queries ...")
-        query_vecs = encode_queries(
-            query_model, query_tokenizer, query_texts,
-            vc["query_max_length"], args.encode_batch_size, device,
-        )
-        query_model.cpu()
-        torch.cuda.empty_cache()
-        ckpt_label = args.checkpoint
+        corpus_dataset = cfg["sae"]["corpus_dataset"]
 
-    corpus_dataset = cfg["sae"]["corpus_dataset"]
-    text_field = cfg["sae"].get("corpus_text_field", "text")
+        if has_index:
+            index_dir = Path(args.index_dir)
+            manifest = _load_manifest(
+                index_dir,
+                expected_doc_splade=doc_hf_id,
+                expected_vocab=doc_splade.vocab_size,
+            )
+            vocab_size = int(manifest["vocab_size"])
+            doc_splade.cpu()
+            del doc_splade
+            torch.cuda.empty_cache()
+            # Convert to fp16 and free the fp32 copy before retrieval to save ~850MB RAM.
+            query_vecs = query_vecs.half()
+            gc.collect()
+            ranked = indexed_retrieve(
+                query_vecs, index_dir, vocab_size,
+                args.densify_chunk, args.topk, device,
+            )
+            n_indexed = sum(
+                int(np.load(sp, allow_pickle=True)["offsets"].shape[0] - 1)
+                for sp in _shard_files(index_dir)
+            )
+            corpus_label = f"{n_indexed:,}-passage on-disk index"
+        else:
+            import pickle, gc
+            subset_cache = Path("data") / f"msmarco_dev_subset_{args.max_corpus_size}.pkl"
+            if subset_cache.exists():
+                print(f"Loading corpus subset from cache {subset_cache} ...")
+                with subset_cache.open("rb") as f:
+                    corpus_ids, corpus_texts = pickle.load(f)
+            else:
+                pickle_path = Path("data") / (corpus_dataset.replace("/", "__") + ".pkl")
+                print(f"Loading corpus pickle for subset build ...")
+                with pickle_path.open("rb") as f:
+                    full_corpus = pickle.load(f)
+                corpus_ids, corpus_texts = build_or_load_subset(full_corpus, qrels, args.max_corpus_size)
+                del full_corpus
+                gc.collect()
 
-    if args.max_corpus_size > 0:
-        # Subset mode: load full corpus pickle, subsample, retrieve from list
-        pickle_path = Path("data") / (corpus_dataset.replace("/", "__") + ".pkl")
-        import pickle
-        print(f"Loading corpus pickle for subset build ...")
-        with pickle_path.open("rb") as f:
-            full_corpus = pickle.load(f)
-        corpus_ids, corpus_texts = build_or_load_subset(full_corpus, qrels, args.max_corpus_size)
-        del full_corpus
+            # Convert to fp16 to halve query-vec RAM (critical for large-vocab models like Lion)
+            query_vecs = query_vecs.half()
+            gc.collect()
+            print(f"Retrieving from {len(corpus_texts):,}-passage subset ...")
+            ranked = list_retrieve(
+                query_vecs, doc_splade, corpus_ids, corpus_texts,
+                doc_max_length, args.doc_batch_size, args.query_batch_size,
+                args.topk, device,
+            )
+            corpus_label = f"{len(corpus_texts):,}-passage subset"
 
-        print(f"Retrieving from {len(corpus_texts):,}-passage subset ...")
-        ranked = list_retrieve(
-            query_vecs, doc_splade, corpus_ids, corpus_texts,
-            vc["doc_max_length"], args.doc_batch_size, args.query_batch_size,
-            args.topk, device,
-        )
-        corpus_label = f"{len(corpus_texts):,}-passage subset"
     else:
-        # Full corpus: score against prebuilt on-disk SPLADE index.
-        # Doc encoder is no longer needed — free its VRAM before scoring.
-        index_dir = Path(args.index_dir)
-        manifest = _load_manifest(
-            index_dir,
-            expected_doc_splade=vc["doc_splade_hf_id"],
-            expected_vocab=doc_splade.vocab_size,
-        )
-        vocab_size = int(manifest["vocab_size"])
-        doc_splade.cpu()
-        del doc_splade
-        torch.cuda.empty_cache()
+        # ── Original vocab_transplant path ────────────────────────────────────
+        vc = cfg["vocab_transplant"]
+        from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
+        from transformers import AutoTokenizer
 
-        ranked = indexed_retrieve(
-            query_vecs, index_dir, vocab_size,
-            args.densify_chunk, args.topk, device,
-        )
-        n_indexed = sum(
-            int(np.load(sp, allow_pickle=True)["offsets"].shape[0] - 1)
-            for sp in _shard_files(index_dir)
-        )
-        corpus_label = f"{n_indexed:,}-passage on-disk index"
+        print(f"Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} ...")
+        doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
+        doc_splade.to(device)
+        doc_splade.eval()
+
+        if args.doc_only:
+            print(f"Encoding {len(query_texts)} dev queries with doc SPLADE (ceiling) ...")
+            query_vecs = encode_queries_with_doc_splade(
+                doc_splade, query_texts, vc["query_max_length"], args.encode_batch_size,
+            )
+            ckpt_label = f"{vc['doc_splade_hf_id']} (doc_only ceiling)"
+        else:
+            transplant_dir = str(
+                Path(f"checkpoints_{vc['query_hf_id'].split('/')[-1]}")
+                / vc["transplant_dir"]
+            )
+            if not Path(transplant_dir, "config.json").exists():
+                raise SystemExit(
+                    f"Transplant directory not found: {transplant_dir}\n"
+                    f"Expected layout (matches train.py): "
+                    f"checkpoints_<query_model>/{vc['transplant_dir']}/config.json\n"
+                    f"Check vocab_transplant.query_hf_id and vocab_transplant.transplant_dir in config.yaml."
+                )
+            print(f"Loading query model from {args.checkpoint} (architecture: {transplant_dir}) ...")
+            query_model = VocabTransplantQuerySPLADE(transplant_dir)
+            ckpt = torch.load(args.checkpoint, map_location="cpu")
+            query_model.load_state_dict(ckpt["model"])
+            query_model.to(device)
+            query_model.eval()
+            query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
+            print(f"  Checkpoint step: {ckpt.get('step', 'unknown')}")
+
+            print(f"Encoding {len(query_texts)} dev queries ...")
+            query_vecs = encode_queries(
+                query_model, query_tokenizer, query_texts,
+                vc["query_max_length"], args.encode_batch_size, device,
+            )
+            query_model.cpu()
+            torch.cuda.empty_cache()
+            del query_model
+            import gc; gc.collect()
+            ckpt_label = args.checkpoint
+
+        corpus_dataset = cfg["sae"]["corpus_dataset"]
+
+        if args.max_corpus_size > 0:
+            import pickle, gc
+            subset_cache = Path("data") / f"msmarco_dev_subset_{args.max_corpus_size}.pkl"
+            if subset_cache.exists():
+                print(f"Loading corpus subset from cache {subset_cache} ...")
+                with subset_cache.open("rb") as f:
+                    corpus_ids, corpus_texts = pickle.load(f)
+            else:
+                pickle_path = Path("data") / (corpus_dataset.replace("/", "__") + ".pkl")
+                print(f"Loading corpus pickle for subset build ...")
+                with pickle_path.open("rb") as f:
+                    full_corpus = pickle.load(f)
+                corpus_ids, corpus_texts = build_or_load_subset(full_corpus, qrels, args.max_corpus_size)
+                del full_corpus
+                gc.collect()
+
+            query_vecs = query_vecs.half()
+            gc.collect()
+            print(f"Retrieving from {len(corpus_texts):,}-passage subset ...")
+            ranked = list_retrieve(
+                query_vecs, doc_splade, corpus_ids, corpus_texts,
+                vc["doc_max_length"], args.doc_batch_size, args.query_batch_size,
+                args.topk, device,
+            )
+            corpus_label = f"{len(corpus_texts):,}-passage subset"
+        else:
+            index_dir = Path(args.index_dir)
+            manifest = _load_manifest(
+                index_dir,
+                expected_doc_splade=vc["doc_splade_hf_id"],
+                expected_vocab=doc_splade.vocab_size,
+            )
+            vocab_size = int(manifest["vocab_size"])
+            doc_splade.cpu()
+            del doc_splade
+            torch.cuda.empty_cache()
+            query_vecs = query_vecs.half()
+            gc.collect()
+            ranked = indexed_retrieve(
+                query_vecs, index_dir, vocab_size,
+                args.densify_chunk, args.topk, device,
+            )
+            n_indexed = sum(
+                int(np.load(sp, allow_pickle=True)["offsets"].shape[0] - 1)
+                for sp in _shard_files(index_dir)
+            )
+            corpus_label = f"{n_indexed:,}-passage on-disk index"
 
     n10 = ndcg_at_k(ranked, qrels, query_ids, k=10)
     m10 = mrr_at_k(ranked, qrels, query_ids, k=10)

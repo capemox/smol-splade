@@ -371,6 +371,99 @@ class FrozenDocSPLADE(nn.Module):
             return logits.max(dim=1).values                      # [B, V]
 
 
+class ShallowSpladeQuery(nn.Module):
+    """SPLADE query encoder built by truncating a doc SPLADE's body to N layers.
+
+    The query model shares the doc encoder's tokenizer, embeddings, and MLM
+    head — only the body is shallower. This sidesteps every cross-architecture
+    mismatch problem the vocab-transplant approach has to fight (vocab overlap,
+    BPE convention, kNN-interpolation quality, head alignment): everything
+    *except* the body's intermediate representations is already exactly correct,
+    because the query model is literally the doc model with later layers
+    removed.
+
+    Training task: re-learn the body so its layer-N output, when fed through the
+    same frozen MLM head, produces SPLADE vectors that align with the full doc
+    encoder's outputs. Standard layer-distillation, with strong priors.
+
+    Currently supports BERT-style architectures (BertForMaskedLM, including
+    naver/splade-v3 which is bert-base-uncased + SPLADE training). Layers live
+    at ``self.mlm.bert.encoder.layer``; head at ``self.mlm.cls``.
+
+    Args:
+        hf_id: HuggingFace ID of the doc SPLADE checkpoint. The query model
+            is constructed by loading this and chopping its body.
+        n_layers: number of body layers to keep (counted from the input side).
+            Must be ``≤`` the model's ``num_hidden_layers``.
+    """
+
+    def __init__(self, hf_id: str, n_layers: int):
+        super().__init__()
+        from transformers import AutoModelForMaskedLM, AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
+        self.mlm = AutoModelForMaskedLM.from_pretrained(hf_id)
+        self.vocab_size: int = self.mlm.config.vocab_size
+
+        # Locate the body and truncate. Keep this guarded so accidental use on
+        # other architectures fails loudly rather than silently no-op'ing.
+        if not hasattr(self.mlm, "bert") or not hasattr(self.mlm.bert, "encoder"):
+            raise ValueError(
+                f"ShallowSpladeQuery currently supports BERT-style MLMs "
+                f"(bert.encoder.layer). Got {type(self.mlm).__name__}."
+            )
+        original_n = len(self.mlm.bert.encoder.layer)
+        if n_layers <= 0 or n_layers > original_n:
+            raise ValueError(
+                f"n_layers={n_layers} must be in [1, {original_n}]"
+            )
+        self.mlm.bert.encoder.layer = nn.ModuleList(
+            list(self.mlm.bert.encoder.layer)[:n_layers]
+        )
+        self.mlm.config.num_hidden_layers = n_layers
+        self.n_layers: int = n_layers
+        self.original_n_layers: int = original_n
+
+    # ── Trainability control ──────────────────────────────────────────
+    def freeze_for_warmup(self) -> None:
+        """Freeze embeddings and the MLM head; only body layers train.
+
+        Used during the warmup phase: the head is the doc encoder's, already
+        perfectly tuned for the SPLADE distribution. Letting it drift while the
+        body is also moving is unstable. Keep it pinned, let the body adapt to
+        producing layer-N hidden states the head can interpret, then unfreeze.
+        """
+        # First freeze everything ...
+        for p in self.parameters():
+            p.requires_grad_(False)
+        # ... then unfreeze just the body.
+        for p in self.mlm.bert.encoder.layer.parameters():
+            p.requires_grad_(True)
+
+    def unfreeze_all(self) -> None:
+        """Unfreeze every parameter for global fine-tuning."""
+        for p in self.parameters():
+            p.requires_grad_(True)
+
+    def trainable_param_count(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    # ── Encoding ──────────────────────────────────────────────────────
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        override_k: int = 0,  # unused; accepted for interface compatibility
+    ) -> torch.Tensor:
+        """Encode pre-tokenized inputs to SPLADE vectors ``[B, vocab_size]``.
+
+        Matches the ``VocabTransplantQuerySPLADE`` interface so this drops into
+        ``_encode_texts`` in eval without modification.
+        """
+        out = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
+        logits = out.logits * attention_mask.unsqueeze(-1).float()
+        return torch.log1p(torch.relu(logits).max(dim=1).values)
+
+
 class FrozenLionSPLADE(nn.Module):
     """Frozen Lion-SP SPLADE encoder (decoder-only Llama, bidirectional).
 
@@ -452,6 +545,87 @@ class FrozenLionSPLADE(nn.Module):
             mask = enc["attention_mask"].unsqueeze(-1).float()
             logits = logits + (1.0 - mask) * -1e6
             return logits.max(dim=1).values
+
+
+class ShallowLionQuery(nn.Module):
+    """Lion-SP-1B truncated to N body layers for use as a lightweight query encoder.
+
+    Same philosophy as ShallowSpladeQuery: keep the full model's embeddings and
+    LM head pinned to the doc encoder's weights during warmup, train only the
+    body layers, then fine-tune everything jointly.
+
+    Layers live at ``self.model.model.layers``; LM head at ``self.model.lm_head``.
+    SPLADE formula mirrors FrozenLionSPLADE:
+        log1p(relu(max_pool(logits * hidden_size^-0.25)))
+    """
+
+    def __init__(self, hf_id: str, n_layers: int):
+        super().__init__()
+        import json
+        from huggingface_hub import hf_hub_download
+        from transformers import LlamaForCausalLM, AutoTokenizer
+        from peft import PeftModel, LoraConfig
+
+        adapter_cfg_path = hf_hub_download(hf_id, "adapter_config.json")
+        with open(adapter_cfg_path) as f:
+            adapter_cfg = json.load(f)
+        base_model_path = adapter_cfg["base_model_name_or_path"]
+        print(f"[ShallowLionQuery] Base: {base_model_path}")
+
+        # bfloat16: same exponent range as float32 so no GradScaler needed,
+        # but half the memory of float32 for weights and AdamW states.
+        base = LlamaForCausalLM.from_pretrained(
+            base_model_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True,
+        )
+        base.config.is_causal = False
+        lora_cfg = LoraConfig.from_pretrained(hf_id)
+        peft_model = PeftModel.from_pretrained(base, hf_id, config=lora_cfg, is_trainable=False)
+        merged = peft_model.merge_and_unload()
+        merged.config.is_causal = False
+
+        self.model = merged
+        self.hidden_size: int = merged.config.hidden_size
+        self.vocab_size: int = merged.config.vocab_size
+
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer.padding_side = "right"
+
+        original_n = len(self.model.model.layers)
+        if n_layers <= 0 or n_layers > original_n:
+            raise ValueError(f"n_layers={n_layers} must be in [1, {original_n}]")
+        self.model.model.layers = nn.ModuleList(list(self.model.model.layers)[:n_layers])
+        self.model.config.num_hidden_layers = n_layers
+        self.n_layers = n_layers
+        self.original_n_layers = original_n
+
+    def freeze_for_warmup(self) -> None:
+        """Freeze embeddings and LM head; only the kept body layers train."""
+        for p in self.parameters():
+            p.requires_grad_(False)
+        for p in self.model.model.layers.parameters():
+            p.requires_grad_(True)
+
+    def unfreeze_all(self) -> None:
+        for p in self.parameters():
+            p.requires_grad_(True)
+
+    def trainable_param_count(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        override_k: int = 0,
+    ) -> torch.Tensor:
+        """Encode pre-tokenized inputs to SPLADE vectors ``[B, vocab_size]``."""
+        out = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+        logits = out.logits * (self.hidden_size ** -0.25)
+        mask = attention_mask.unsqueeze(-1).float()
+        logits = logits + (1.0 - mask) * -1e6
+        return torch.log1p(torch.relu(logits.max(dim=1).values))
 
 
 def splade_loss(

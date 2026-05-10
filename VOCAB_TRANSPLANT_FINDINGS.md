@@ -276,6 +276,12 @@ and in-batch hard negatives don't provide strong enough signal to push further.
    which changes the transplant and dot-product space significantly.
    Note: no SPLADE models between ~110M and ~600M appear to exist publicly.
 
+   **Update**: this is now done with `lion_transplant_align`
+   (`Lion-SP-1B-llama3-marco-mntp`, 128K Llama-3 BPE vocabulary). After resolving
+   several distinct training-dynamics issues (see Lion-SP-1B Variant section
+   below), it reaches NDCG@10=0.6410 on NanoMSMARCO vs 0.6510 doc-doc ceiling.
+   8B doc encoder is still TODO.
+
 3. **Is tokensurgeon interpolation quality the binding constraint?** The kNN interpolation
    for non-shared tokens is an approximation. Random-init ablation confirms init matters;
    the question is whether *better* interpolation (larger k, different weighting) would
@@ -374,3 +380,272 @@ Run doc-only upper bound:
 ```bash
 uv run scripts/eval_msmarco.py --doc_only
 ```
+
+---
+
+## Lion-SP-1B Variant (`lion_transplant_align`)
+
+### Setup
+
+Same idea as `vocab_transplant_align` but the frozen doc encoder is
+`hzeng/Lion-SP-1B-llama3-marco-mntp` (1B Llama-3, bidirectional, MS MARCO trained,
+SIGIR 2025) instead of `naver/splade-v3`. The query encoder is
+`jhu-clsp/ettin-encoder-150m` transplanted onto Lion's 128K Llama-3 BPE vocabulary.
+
+This stresses the transplant pipeline considerably:
+- Vocabulary overlap between ettin (~50K wordpiece) and Llama-3 (128K BPE) is **single-digit
+  percent** — ~95% of donor tokens are kNN-interpolated, vs. ~40% for the splade-v3 case.
+- Lion's SPLADE outputs are very sparse for short queries (~190 nnz vs. splade-v3's
+  several hundred), so the alignment target lives in a much smaller subspace of the 128K
+  output dimension.
+
+### Dead Ends (and Why)
+
+Several "obvious" fixes failed in instructive ways. Recording them so we don't retry.
+
+**Pure cosine alignment on `q_vecs`** (initial implementation): collapses to `q_nnz=0,
+loss=1.0` within ~3000 steps. Cosine is scale-invariant, so the model can drift to
+arbitrarily small magnitudes; once `q_vecs ≡ 0` the relu has zero gradient and the
+state is absorbing. Cosine returns 0 for a zero vector by PyTorch convention, so
+`align_loss` saturates at 1.0 and gradient flow stops entirely.
+
+**L1 FLOPs (`q_vecs.abs().sum(-1).mean()`)**: same collapse mode, accelerated. L1's
+gradient is uniform across active elements regardless of magnitude — pushes everything
+toward zero at the same rate, blowing past the desired sparse equilibrium. The
+codebase already documents this in `vocab_transplant_splade_loss` ("L1 was too
+aggressive"); the Lion variant was inconsistent and used L1 anyway.
+
+**Squared-mean FLOPs (`(q_vecs.mean(0) ** 2).sum()`)**: necessary but insufficient.
+Gradient ∝ activation magnitude is the right primitive (kills loud activations
+strongly, leaves small ones to stabilise) but doesn't fix the underlying cosine
+instability — collapse still happens, just slower.
+
+**Sum-MSE on `q_vecs` as a magnitude anchor**
+(`(q_vecs - d_vecs).pow(2).sum(-1).mean()`): made things *worse*. Initial MSE was
+~19,000 (huge) so it dominated the loss, overshot, and any loss computed on `q_vecs`
+inherits the dead-relu trap once `q_vecs ≡ 0`. Magnitude anchors only help if they
+operate on a quantity that has gradient through the dead-relu state.
+
+**Softmax-KL on raw logits + cosine on `q_vecs`** (the "obvious" KD-style fix):
+seemed to work at first — `q_nnz` stayed alive in 50–500 range for a 5000-step smoke,
+no immediate collapse. But the failure mode showed up at the KD → cos phase boundary
+in a real 50k-step run:
+
+- KD phase reached `loss=0.007, q_nnz≈90k` — i.e. KL drove the *shape* of `softmax(q_logits/T)`
+  to match Lion's, but the *offset* drifted upward freely (softmax is shift-invariant).
+  All logits ended up positive → q_vecs dense, not sparse.
+- At the phase transition, cos saw a huge mismatch (dense `q_vecs` vs sparse `d_vecs`)
+  and overcorrected, sparsifying so aggressively that all logits went negative.
+- Once `q_vecs ≡ 0`: cos has zero gradient through dead relu, KL is *also* satisfied
+  (shift-invariance → can claim alignment), FLOPs is zero. Total loss stuck at ~1.0
+  with zero parameter gradient. Dead.
+
+The KL "safety net" gave up the offset axis entirely. That's the trap: any loss on a
+softmax-normalized quantity is shift-invariant on its inputs.
+
+**Bumping `lambda_q` to fix density**: backfires. `lambda_q=0.005` collapses `q_nnz`
+to ~7 within 1000 steps; `lambda_q=0.01` collapses faster. Tightening sparsity
+regularisation accelerates the transition into the dead-relu basin.
+
+### Working Formulation
+
+Two-phase, both phases use the same single forward pass through ettin and Lion:
+
+**Phase 1 — KD warmup** (`kd_warmup_steps`, default 0): softmax-KL on
+max-pooled raw logits at temperature T=4. Warms the model into Lion's logit-shape
+basin without yet committing to the absolute logit values. Squared-mean FLOPs is
+**now also active during this phase** (previously off) so the warmup ends with
+sparse `q_vecs` instead of dense ~90k.
+
+**Phase 2 — Cosine alignment + softmax-KL safety net**:
+
+```python
+cos_loss = (1.0 - F.cosine_similarity(q_vecs, torch.log1p(torch.relu(d_logits)))).mean()
+kl_loss  = T**2 * F.kl_div(log_softmax(q_logits/T), softmax(d_logits/T))
+align_loss = cos_loss + kl_coeff * kl_loss
+```
+
+Cosine drives the SPLADE-vector direction. The KL term operates on raw signed
+logits, so its gradient survives even when `q_vecs ≡ 0` (the relu kills the
+cosine gradient but not KL). FLOPs (always on, both phases) anchors the absolute
+scale to keep softmax-KL's shift-invariance from drifting the offset.
+
+**Why not BCE-with-logits** (an earlier attempt): BCE-with-logits against
+`sigmoid(d_logits)` looks attractive — it's not shift-invariant, operates on
+raw logits, and encodes Lion's sparsity directly. But it plateaued in practice:
+
+- *Without* `pos_weight`: ~190 active vs ~128,000 inactive targets per query
+  (670:1 imbalance) → inactive class dominates gradient → model learns "make
+  everything negative" → `q_nnz` plateaus at ~5–10, NDCG caps around 0.42.
+- *With* dynamic `pos_weight = n_neg / n_pos ≈ 425`: the formula is designed
+  for binary targets, but soft sigmoid targets in the [0.05, 0.5] range
+  (tokens with d_logit slightly negative) get scaled by `pw·t` ≈ 50–200,
+  flipping their equilibrium to σ(q) ≈ 1. Result: `q_nnz` blew up to 128,256
+  (every dim active), NDCG = 0.
+
+So while BCE-with-logits has nice theoretical properties at the boundary
+(relu, shift), the soft-target loss landscape is treacherous at this vocab
+scale and class imbalance. Cosine + KL turned out to be more stable in
+practice, which matched the user's prior runs.
+
+Squared-mean FLOPs stays available but as a fine-tuning knob, not the primary
+sparsity mechanism:
+
+```yaml
+lambda_q: 0.001    # try 0.0 first; bump only if q_nnz drifts above target
+```
+
+### Results (50k-step run, ettin-encoder-150m → Lion-SP-1B)
+
+Final checkpoint, NDCG@10 vs the Lion-Lion symmetric ceiling:
+
+| dataset | step 40k | step 50k | Lion-Lion ceiling | gap |
+|---|---|---|---|---|
+| NanoMSMARCO  | 0.6129 | **0.6410** | 0.6510 | -0.010 |
+| NanoNFCorpus | 0.3105 | **0.3211** | 0.3480 | -0.027 |
+
+The asymmetric setup (ettin-150m on queries, Lion-1B on docs) lands within
+~0.01 of the symmetric Lion-Lion ceiling on NanoMSMARCO. Full MSMARCO dev
+eval needed to confirm (NanoBEIR is 50 queries → ±0.05 noise floor) but the
+gap to ceiling is small enough that this looks like a real result, not a
+measurement artefact.
+
+Per-batch sparsity from training logs:
+
+|        | q (ettin-150m) | d (Lion-1B on the same query texts) |
+|---|---|---|
+| nnz    | 150–220 | 250–350 |
+| L1 mass | 35–45  | 55–65   |
+
+Query nnz is meaningfully lower than doc nnz — the standard SPLADE asymmetry
+emerged on its own from the cosine alignment dynamics, no separate `lambda_q`
+vs `lambda_d` tuning required.
+
+### Operational Gotcha — Eval Memory Leak
+
+`evaluate_asymmetric` encodes thousands of corpus docs through Lion-SP-1B in fp16.
+PyTorch's caching allocator holds those activations even after the eval tensors are
+freed, so the next training step OOMs trying to allocate its own activations on top.
+Fix: explicit `gc.collect(); torch.cuda.empty_cache()` *after* both the initial eval
+and every periodic eval (`train.py:1508` and `train.py:1625`).
+
+If OOM still happens at periodic evals: drop `eval_batch_size` (currently 4) — Lion
+creates `[B, L, 128K]` fp16 activations and the peak during eval dictates whether
+resumed training fits.
+
+### Implementation Reference
+
+| Component | File | Entry point |
+|---|---|---|
+| Lion vocab transplant (tokensurgeon over PEFT) | `train.py` | `_run_tokensurgeon_lion()` |
+| FrozenLionSPLADE doc encoder | `src/model.py` | `FrozenLionSPLADE` |
+| Training loop (KD + BCE + FLOPs) | `train.py` | `train_lion_transplant_align()` |
+
+Run:
+```bash
+uv run train.py lion_transplant_align --config config.yaml
+```
+
+Healthy log signature (post-warmup phase tagged `cos`):
+```
+[lion-align/cos] step  N | loss <decreasing> | q_nnz 50–300 (lion 250–350) | flops … | lr …
+```
+
+`q_nnz` should track `lion d_nnz` within an order of magnitude. If you
+see one of these, something's wrong:
+
+```
+[lion-align/cos] step  N | loss 1.0xxx | q_nnz 0.0 (lion ~300) | …
+```
+Dead relu basin. Cosine drove magnitudes to zero, KL safety net wasn't strong
+enough. Bump `kl_coeff` or shorten `flops_warmup_steps`.
+
+```
+[lion-align/cos] step  N | loss …      | q_nnz 128256 (lion ~300) | …
+```
+Density runaway — every dim active, retrieval is meaningless. Check whether
+something is upweighting the positive class (e.g., a stray BCE pos_weight)
+or whether `lambda_q` is too low to provide any sparsity pressure.
+
+### Backbone Transferability — bert-base-uncased (negative result)
+
+The 50k ettin-150m run (NDCG@10=0.6410, ~ceiling) made the recipe look
+backbone-agnostic. It isn't. Replacing the query encoder with
+`google-bert/bert-base-uncased` produced a chain of failures, none of which
+were the *same* failure as the ettin debugging earlier in this doc.
+
+#### What we tried, in order
+
+1. **Vanilla cos+KL alignment** (the configuration that worked for ettin).
+   Collapsed to `q_nnz=0, loss=1.01` by step 3000.
+2. **MSE-on-raw-logits anchor**. Made it worse (collapsed faster). MSE pulls
+   `q_logits` toward `d_logits`, which is mostly *very negative* for Lion's
+   sparse SPLADE — exactly the wrong direction.
+3. **Softplus instead of relu in the SPLADE encoding**. Hard relu's "dead
+   gradient" trap was a suspect. Softplus didn't help — the issue isn't the
+   relu, it's earlier.
+4. **MLM-head bias calibration**. We measured it: bert-base post-transplant
+   produces `q_logits` with mean=-2.7, frac>0=0.87% (vs ettin's mean=+0.4,
+   frac>0=58.8%). Calibration shifts the bias by `-mean(q_logits)` so the
+   initial distribution centres at 0. Helped at *step 0* but the model drifts
+   back into the dead basin within a few hundred steps of alignment.
+5. **MLM warmup phase** (re-train body+head on standard masked-LM in Llama-3
+   vocab before alignment). 10k steps, lr=1e-4, mask token = a Llama-3
+   reserved special token, BERT-style 80/10/10 masking, `cls.predictions.bias`
+   zeroed (it was bert-mismapped). MLM loss dropped from `log(128k)≈11.76` to
+   ~8 in the first 50 steps then **plateaued there**. Loss=8 ≈ unigram-only
+   prediction (knowing what tokens are common overall, no context).
+6. Investigating: a single-example overfit drops loss 9.3 → 0.7 in 30 steps
+   at lr=1e-4. So forward, backward, optimizer all work. The problem is
+   *specifically* the multi-batch case — the model can memorise but can't
+   generalise.
+
+#### What's actually wrong
+
+The transplant's quality is the binding constraint. Specifically:
+
+- Llama-3 tokenizes English with `Ġ`-prefixed BPE pieces (`Ġcat`, `Ġsat`, …).
+  BERT's WordPiece doesn't use `Ġ` anywhere in its vocab.
+- `_run_tokensurgeon_lion` does **exact string matching** to find shared tokens.
+  For Llama-3 ↔ bert-base WordPiece, near-zero content tokens match — almost
+  every token in real English text gets a kNN-interpolated embedding rather
+  than a directly-copied one.
+- bert-base's body was trained on real BERT-WordPiece embeddings. With ~95%
+  of input embeddings interpolated, the body's hidden states become OOD. It
+  can produce broadly-correct unigram-level predictions through the head
+  (after the bias is calibrated), but it can't extract context-specific
+  information from these distorted hidden states.
+- ettin/ModernBERT survived this because its body is more robust (newer
+  architecture, longer pretraining, better data). bert-base doesn't.
+
+This is not a hyperparameter issue. The binding constraint is the embedding
+table, and tokensurgeon's exact-string + cosine-NN strategy is too lossy for
+backbones whose tokenizer disagrees with the donor's at the substring level.
+
+#### What might fix it (not yet tried)
+
+1. **BPE-decomposition transplant**: instead of cosine-NN in donor space for
+   non-shared tokens, decompose each Llama-3 BPE token into BERT WordPiece
+   subwords and average those embeddings. Should give bert-base much better
+   coverage. The WECHSEL paper (Minixhofer et al.) does this kind of
+   subword-aware cross-lingual transfer.
+2. **Real pretraining-scale MLM warmup**: 100k+ steps. Train the body to
+   interpret interpolated embeddings.
+3. **roberta-base instead of bert-base**: RoBERTa uses GPT-2-style BPE with
+   the same `Ġ` prefix convention as Llama-3. String overlap should be
+   dramatically higher. This is the cleanest test of the
+   "BPE-overlap vs. body-robustness" hypothesis. ← currently being tested.
+
+#### Diagnostic helpers we added (kept in the codebase)
+
+These all live in `train_lion_transplant_align` and are skipped on resume:
+
+- **MLM head bias calibration** (always on, `calibrate_bias: true` config knob,
+  `train.py:1498`). Measures `mean(q_logits)` over a batch of training queries
+  and shifts the head bias by `-mean`. Cheap; no downside.
+- **MLM warmup phase** (off by default, `mlm_warmup_steps: 0`,
+  `train.py:1540`). Standard masked-LM in the donor vocab. Recommend 0 for
+  ettin-style backbones, ≥10k for bert-style ones (though even 10k didn't
+  rescue bert-base — see above).
+- **`d_nnz` logging** alongside `q_nnz` so you can compare the model's
+  output sparsity to Lion's target live, `train.py:1700+`.

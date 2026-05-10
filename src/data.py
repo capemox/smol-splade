@@ -256,6 +256,31 @@ def build_query_lookup(queries_dataset: str) -> Dict[str, str]:
 # Alignment warm-up loader
 # ──────────────────────────────────────────────────────────────────────────────
 
+def make_ranking_distill_loader(
+    nway: int,
+    batch_size: int,
+) -> Iterator:
+    """Yields (query_texts, passage_texts_flat) for ranking distillation.
+
+    Streams Tevatron/msmarco-passage hard negatives. passage_texts_flat has
+    length B*nway; the first entry for each query is its positive passage.
+    Teacher scores are computed on-the-fly in the training loop.
+    """
+    def generate():
+        batch_q: List[str] = []
+        batch_p: List[str] = []
+        while True:
+            for item in TevatronMSMARCODataset(nway=nway):
+                batch_q.append(item["query"])
+                batch_p.extend(p.get("text", "") for p in item["passages"])
+                if len(batch_q) == batch_size:
+                    yield list(batch_q), list(batch_p)
+                    batch_q.clear()
+                    batch_p.clear()
+
+    return generate()
+
+
 def make_alignment_loader(
     dataset_name: str,
     text_field: str,
