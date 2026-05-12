@@ -482,11 +482,15 @@ direct_align:
 #   Phase 0 (freeze_warmup_steps): only the kept body layers train.
 #     Embeddings + MLM head stay frozen at doc-encoder values, giving the body
 #     a stable target before the input representations start moving too.
-#   Phase 1 (alignment_steps): embeddings unfreeze; everything trains except
-#     the MLM head (must stay frozen for dot-product compatibility with doc side).
+#   Phase 1 (alignment_steps): embeddings and head unfreeze at a lower LR than
+#     the retained body layers, preserving the shared vocab space while allowing
+#     the lightweight query encoder to adapt.
 #
-# Loss: cos(q_vecs, d_vecs) + kl_coeff * KL(q_logits/T || d_logits/T)
-#   Same recipe as the successful ettin-150m Lion run.
+# Loss: teacher-vector MSE + optional contrastive CE + query L1.
+# The MSE distills the full doc encoder's query SPLADE vector. The contrastive
+# term scores each student query against frozen teacher passage vectors from
+# the Tevatron positive + hard-negative set, so training also learns retrieval
+# margins rather than only matching the teacher query vector.
 #
 # Run: uv run train.py splade_shallow_align --config config.yaml
 splade_shallow_align:
@@ -509,14 +513,159 @@ splade_shallow_align:
   weight_decay: 0.01
   fp16: true
 
-  # MarginMSE distillation: teacher = frozen splade-v3, student = shallow model
+  # Distillation: teacher = frozen splade-v3, student = shallow model
   nway: 8                         # 1 positive + 7 hard negatives per query (from Tevatron)
+  contrastive_coeff: 0.1           # CE over in-batch teacher passage vectors; 0 disables
+  contrastive_temperature: 1.0     # divide student query-passage dot products by this
   lambda_q: 0.0001                # target L1 for sparsity; STE prevents dead-ReLU
   lambda_q_warmup_steps: 5_000   # ramp lambda_q 0→target so model learns dims before pruning
 
   log_every: 200
   save_every: 10_000
   output_dir: "splade_shallow_align"
+
+
+# ── Stage: Shallow SPLADE with ALBERT-style lexical factorization ────────────
+# Same stable recipe as splade_shallow_align, but replaces the tied
+# [vocab, hidden] input embedding / MLM decoder matrix with two tied factors:
+#   A: [vocab, factorized_embedding_dim]
+#   B: [factorized_embedding_dim, hidden]
+# The output head uses hidden -> B.T -> A.T, so the sparse output vocabulary
+# remains exactly the same while cutting the lexical parameter floor.
+#
+# Run: uv run train.py splade_shallow_factorized_align --config config.yaml
+splade_shallow_factorized_align:
+  doc_splade_hf_id: "naver/splade-v3"
+  n_layers: 3
+  factorized_embedding_dim: 128   # ALBERT-style bottleneck/rank for tied embedding + MLM head
+  factorization_init: "svd"       # initialise A/B from the full SPLADE-v3 tied matrix
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 16
+  gradient_accumulation_steps: 2   # effective batch = 32; matches the stable shallow recipe
+  eval_batch_size: 32
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01             # factorized lexical factors are sensitive after unfreeze
+  freeze_head_after_warmup: false  # unfreeze after warmup; contrastive remains off for isolation
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  use_contrastive: false          # try the cheaper pre-contrastive shallow recipe first
+  log_ranking_metrics: false      # avoids frozen passage encoding on log steps when contrastive is off
+  contrastive_coeff: 0.1
+  contrastive_temperature: 1.0
+  lambda_q: 0.0002                # slightly stronger than shallow_align; factorized head tends to drift denser
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "splade_shallow_factorized_align"
+
+
+# ── Stage: Factorized shallow SPLADE with spaced doc layers ──────────────────
+# Same as splade_shallow_factorized_align, but the 3-layer query body is composed
+# from doc layers [0, 6, 11] rather than the first three contiguous layers.
+# Uses frozen factorized embedding / SPLADE head throughout and no contrastive
+# passage loss, matching the strongest factorized-head finding so far.
+#
+# Run: uv run train.py splade_shallow_factorized_spaced_align --config config.yaml
+splade_shallow_factorized_spaced_align:
+  doc_splade_hf_id: "naver/splade-v3"
+  n_layers: 3
+  layer_indices: [0, 6, 11]       # first, 7th, and last layer from BERT-base SPLADE-v3
+  factorized_embedding_dim: 128
+  factorization_init: "svd"
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  eval_batch_size: 32
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01
+  freeze_head_after_warmup: true
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  use_contrastive: false
+  log_ranking_metrics: false
+  contrastive_coeff: 0.1
+  contrastive_temperature: 1.0
+  lambda_q: 0.0002
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "splade_shallow_factorized_spaced_align"
+
+
+# ── Stage: Shallow SPLADE cross-encoder distillation ─────────────────────────
+# Same query/doc architecture as splade_shallow_align, but the loss is
+# traditional cross-encoder MarginMSE:
+#   CE(q,pos) - CE(q,neg) ≈ dot(q_student,d_pos_full_splade) - dot(q_student,d_neg_full_splade)
+# The document encoder stays frozen; only the shallow query encoder learns.
+#
+# SPLADE-v3 used SparseDistillKLDivLoss and SparseMarginMSELoss with an ensemble
+# of five cross-encoder rerankers. For a first local experiment this uses a
+# single public MS MARCO cross-encoder; swap cross_encoder_hf_id for a heavier
+# teacher once the loop is validated.
+#
+# Run: uv run train.py splade_shallow_align_distill --config config.yaml
+splade_shallow_align_distill:
+  doc_splade_hf_id: "naver/splade-v3"
+  n_layers: 3
+
+  # Original SPLADE++ score source / simple public reranker. SPLADE-v3 used an
+  # ensemble with this plus naver/trecdl22-crossencoder-{rankT53b-repro,
+  # debertav3,debertav2,electra}; use one of those here if you want a stronger
+  # but heavier single teacher.
+  cross_encoder_hf_id: "cross-encoder/ms-marco-MiniLM-L6-v2"
+  teacher_batch_size: 8
+  teacher_max_length: 256
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 4   # effective batch = 16; keep per-step memory 8GB-friendly
+  eval_batch_size: 8               # used for frozen SPLADE passage/eval chunks
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.1
+
+  alignment_steps: 50_000
+  alignment_lr: 1.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  # Cross-encoder logits are arbitrary-scale teacher scores. Raw MarginMSE
+  # alone lets the query model satisfy margins by changing vector mass/nnz, so
+  # keep a full-SPLADE query-vector anchor and rescale/clamp margins.
+  # The anchor is intentionally stronger than the margin term early on: without
+  # it the model can satisfy margins with only a few high-value dimensions.
+  query_anchor_coeff: 0.75
+  teacher_margin_scale: 0.35
+  teacher_margin_clip: 5.0
+  lambda_q: 0.0002
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "splade_shallow_align_distill"
 
 
 # ── Stage: Lion-SP-1B shallow query encoder ───────────────────────────────────

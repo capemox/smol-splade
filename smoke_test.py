@@ -15,7 +15,23 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from model import TopKSAE, SAEPretrainModel, sae_loss, SAESPLADEModel, splade_loss, FrozenDocSPLADE, asymmetric_splade_loss, ProjectedQuerySPLADE, projected_alignment_loss, VocabTransplantQuerySPLADE, vocab_transplant_splade_loss, vocab_transplant_joint_loss
+from model import (
+    TopKSAE,
+    SAEPretrainModel,
+    sae_loss,
+    SAESPLADEModel,
+    splade_loss,
+    FrozenDocSPLADE,
+    asymmetric_splade_loss,
+    ProjectedQuerySPLADE,
+    projected_alignment_loss,
+    VocabTransplantQuerySPLADE,
+    vocab_transplant_splade_loss,
+    vocab_transplant_joint_loss,
+    FactorizedWordEmbeddings,
+    FactorizedBertDecoder,
+    _factorize_embedding_matrix,
+)
 
 HIDDEN = 64
 SAE_WIDTH = 128
@@ -944,6 +960,594 @@ def test_vocab_transplant_align():
     print(f"  [PASS] parity — identical weights → identical encode output")
 
 
+# ── Test 14: splade_shallow_align_distill config + training mechanics ─────────
+
+def test_splade_shallow_align_distill_config():
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+    assert "splade_shallow_align_distill" in cfg, "distill config section missing"
+    sc = cfg["splade_shallow_align_distill"]
+
+    assert sc["doc_splade_hf_id"] == "naver/splade-v3"
+    assert sc["cross_encoder_hf_id"], "cross_encoder_hf_id must be set"
+    assert sc["freeze_warmup_steps"] == 5_000, "warmup should match the working shallow setup"
+    assert sc["head_lr_scale"] == 0.1, "head/embedding LR scale should match the working shallow setup"
+    assert sc["query_anchor_coeff"] >= 0.5, "distill needs a strong vector anchor to keep q_nnz stable"
+    assert sc["teacher_margin_scale"] < 1.0, "raw cross-encoder margins should be rescaled"
+    assert sc["teacher_margin_clip"] > 0.0, "teacher margins should be clipped for stability"
+    assert 0.0 < sc["lambda_q"] <= 0.0005, "distill sparsity should be present but not dominate the anchor"
+    assert sc["nway"] >= 2, "MarginMSE needs at least one negative"
+    assert sc["lambda_q_warmup_steps"] > 0, "sparsity warmup should be enabled"
+    print(
+        "  [PASS] splade_shallow_align_distill config — "
+        f"teacher={sc['cross_encoder_hf_id']}, warmup={sc['freeze_warmup_steps']}, "
+        f"head_lr_scale={sc['head_lr_scale']}"
+    )
+
+
+def test_splade_shallow_align_distill_training_smoke():
+    import importlib.util
+    import tempfile
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import torch.utils.tensorboard as tensorboard_mod
+    import transformers
+
+    spec = importlib.util.spec_from_file_location(
+        "train_mod_distill_smoke", Path(__file__).parent / "train.py"
+    )
+    train_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(train_mod)
+
+    VOCAB = 32
+    ORIGINAL_LAYERS = 4
+    KEEP_LAYERS = 2
+    events = {"freeze": 0, "unfreeze": 0, "doc_encode": 0, "ce_forward": 0}
+
+    class FakeTokenizer:
+        def __call__(self, texts, text_pair=None, **kwargs):
+            if isinstance(texts, str):
+                texts = [texts]
+            if text_pair is None:
+                rows = len(texts)
+                ids = torch.arange(rows * 4).view(rows, 4) % 99
+            else:
+                rows = len(texts)
+                # Positive passages carry a larger teacher logit than negatives.
+                ids = torch.zeros(rows, 4, dtype=torch.long)
+                for i, passage in enumerate(text_pair):
+                    ids[i, 0] = 5 if passage.endswith("_0") else 1
+            return {
+                "input_ids": ids,
+                "attention_mask": torch.ones(rows, 4, dtype=torch.long),
+            }
+
+    class FakeMLMOutput:
+        def __init__(self, logits):
+            self.logits = logits
+
+    class FakeEncoder(torch.nn.Module):
+        def __init__(self, n_layers):
+            super().__init__()
+            self.layer = torch.nn.ModuleList(
+                [torch.nn.Linear(HIDDEN, HIDDEN) for _ in range(n_layers)]
+            )
+
+    class FakeBert(torch.nn.Module):
+        def __init__(self, n_layers):
+            super().__init__()
+            self.encoder = FakeEncoder(n_layers)
+
+    class FakeMLM(torch.nn.Module):
+        def __init__(self, n_layers):
+            super().__init__()
+            self.config = SimpleNamespace(vocab_size=VOCAB, num_hidden_layers=n_layers)
+            self.embeddings = torch.nn.Embedding(100, HIDDEN)
+            self.bert = FakeBert(n_layers)
+            self.cls = torch.nn.Linear(HIDDEN, VOCAB)
+
+        def forward(self, input_ids, attention_mask=None):
+            h = self.embeddings(input_ids)
+            for layer in self.bert.encoder.layer:
+                h = torch.tanh(layer(h))
+            return FakeMLMOutput(self.cls(h))
+
+    class FakeShallowSpladeQuery(torch.nn.Module):
+        def __init__(self, hf_id, n_layers):
+            super().__init__()
+            self.tokenizer = FakeTokenizer()
+            self.mlm = FakeMLM(n_layers)
+            self.vocab_size = VOCAB
+            self.n_layers = n_layers
+            self.original_n_layers = ORIGINAL_LAYERS
+
+        def freeze_for_warmup(self):
+            events["freeze"] += 1
+            for p in self.parameters():
+                p.requires_grad_(False)
+            for p in self.mlm.bert.encoder.layer.parameters():
+                p.requires_grad_(True)
+
+        def unfreeze_all(self):
+            events["unfreeze"] += 1
+            for p in self.parameters():
+                p.requires_grad_(True)
+
+        def trainable_param_count(self):
+            return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        def encode(self, input_ids, attention_mask, override_k=0):
+            out = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
+            logits = out.logits * attention_mask.unsqueeze(-1).float()
+            return torch.log1p(torch.relu(logits).max(dim=1).values)
+
+    class FakeFrozenDocSPLADE(torch.nn.Module):
+        vocab_size = VOCAB
+
+        def __init__(self, hf_id):
+            super().__init__()
+            self.tokenizer = FakeTokenizer()
+
+        def encode(self, texts, max_length, **kwargs):
+            events["doc_encode"] += 1
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            rows = []
+            for text in texts:
+                idx = 0 if text.endswith("_0") else 1
+                vec = torch.zeros(VOCAB, device=device)
+                vec[idx] = 2.0
+                vec[(idx + 3) % VOCAB] = 0.5
+                rows.append(vec)
+            return torch.stack(rows, dim=0)
+
+    class FakeCrossEncoder(torch.nn.Module):
+        def __init__(self, hf_id):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1), requires_grad=False)
+
+        def forward(self, input_ids, attention_mask=None):
+            events["ce_forward"] += 1
+            return SimpleNamespace(logits=input_ids[:, :1].float())
+
+    class FakeWriter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_scalar(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_loader(nway, batch_size):
+        assert nway == 3
+        def generate():
+            while True:
+                q_texts = [f"q{i}" for i in range(batch_size)]
+                p_texts = []
+                for i in range(batch_size):
+                    p_texts.extend([f"p{i}_0", f"p{i}_1", f"p{i}_2"])
+                yield q_texts, p_texts
+        return generate()
+
+    original_adamw = torch.optim.AdamW
+    adamw_lrs = []
+
+    class TrackingAdamW(original_adamw):
+        def __init__(self, params, *args, **kwargs):
+            super().__init__(params, *args, **kwargs)
+            adamw_lrs.append([group["lr"] for group in self.param_groups])
+
+    cfg = {
+        "splade_shallow_align_distill": {
+            "doc_splade_hf_id": "fake/doc-splade",
+            "cross_encoder_hf_id": "fake/cross-encoder",
+            "n_layers": KEEP_LAYERS,
+            "freeze_warmup_steps": 1,
+            "head_lr_scale": 0.1,
+            "alignment_steps": 2,
+            "alignment_lr": 2e-4,
+            "weight_decay": 0.01,
+            "fp16": False,
+            "lambda_q": 0.0001,
+            "lambda_q_warmup_steps": 1,
+            "nway": 3,
+            "batch_size": 2,
+            "gradient_accumulation_steps": 1,
+            "teacher_batch_size": 4,
+            "teacher_max_length": 16,
+            "query_max_length": 8,
+            "doc_max_length": 8,
+            "eval_batch_size": 4,
+            "log_every": 1,
+            "save_every": 100,
+            "output_dir": "distill_smoke",
+        },
+        "eval": {"datasets": []},
+    }
+
+    import model as model_mod
+    import data as data_mod
+
+    old_adamw = torch.optim.AdamW
+    old_writer = tensorboard_mod.SummaryWriter
+    try:
+        torch.optim.AdamW = TrackingAdamW
+        tensorboard_mod.SummaryWriter = FakeWriter
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(model_mod, "FrozenDocSPLADE", FakeFrozenDocSPLADE), \
+             patch.object(model_mod, "ShallowSpladeQuery", FakeShallowSpladeQuery), \
+             patch.object(data_mod, "make_ranking_distill_loader", fake_loader), \
+             patch.object(transformers.AutoTokenizer, "from_pretrained", return_value=FakeTokenizer()), \
+             patch.object(transformers.AutoModelForSequenceClassification, "from_pretrained", side_effect=FakeCrossEncoder):
+            train_mod._model_ckpt_root = lambda hf_id: Path(tmp)
+            train_mod.train_splade_shallow_align_distill(cfg)
+    finally:
+        torch.optim.AdamW = old_adamw
+        tensorboard_mod.SummaryWriter = old_writer
+
+    assert events["freeze"] == 1, "warmup freeze_for_warmup was not called exactly once"
+    assert events["unfreeze"] == 1, "phase-boundary unfreeze_all was not called exactly once"
+    assert events["doc_encode"] > 0, "frozen document encoder was not used for passage vectors"
+    assert events["ce_forward"] > 0, "cross-encoder teacher was not used"
+    assert len(adamw_lrs) >= 2, "expected warmup optimizer and phase-1 optimizer"
+    phase1_lrs = adamw_lrs[1]
+    assert len(phase1_lrs) == 2, f"phase-1 optimizer should have body/head groups, got {phase1_lrs}"
+    assert abs(phase1_lrs[1] / phase1_lrs[0] - 0.1) < 1e-6, \
+        f"head LR should be 0.1x body LR, got {phase1_lrs}"
+    print(
+        "  [PASS] splade_shallow_align_distill loop — "
+        f"freeze={events['freeze']}, unfreeze={events['unfreeze']}, "
+        f"phase1_lrs={[f'{lr:.2e}' for lr in phase1_lrs]}, "
+        f"doc_calls={events['doc_encode']}, teacher_calls={events['ce_forward']}"
+    )
+
+
+# ── Test 15: splade_shallow_factorized_align config + tying ──────────────────
+
+def test_factorized_embedding_head_tying():
+    VOCAB = 32
+    H = 16
+    R = 4
+
+    full_weight = torch.randn(VOCAB, H)
+    A, B = _factorize_embedding_matrix(full_weight, R)
+    emb = FactorizedWordEmbeddings(VOCAB, H, R, padding_idx=0)
+    emb.lexical_embeddings.weight.data.copy_(A)
+    emb.up_project.weight.data.copy_(B.T)
+    decoder = FactorizedBertDecoder(emb, bias=torch.zeros(VOCAB))
+
+    ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    hidden = emb(ids)
+    logits = decoder(hidden)
+
+    assert hidden.shape == (2, 3, H), f"factorized embedding shape mismatch: {hidden.shape}"
+    assert logits.shape == (2, 3, VOCAB), f"factorized decoder shape mismatch: {logits.shape}"
+    assert torch.allclose(decoder.weight, emb.weight), "decoder and input embeddings must share factors"
+
+    bottleneck = F.linear(hidden, emb.up_project.weight.T)
+    manual_logits = F.linear(bottleneck, emb.lexical_embeddings.weight, decoder.bias)
+    assert torch.allclose(logits, manual_logits), "decoder should compute hidden -> B.T -> A.T"
+
+    tied_full_params = VOCAB * H + VOCAB
+    factorized_params = VOCAB * R + R * H + VOCAB
+    assert factorized_params < tied_full_params, "factorization should reduce tied lexical params"
+
+    loss = logits.sum() + hidden.sum()
+    loss.backward()
+    assert emb.lexical_embeddings.weight.grad is not None, "shared lexical factor must receive gradients"
+    assert emb.up_project.weight.grad is not None, "projection factor must receive gradients"
+    print(
+        "  [PASS] factorized embedding/head tying — "
+        f"full={tied_full_params} params, factorized={factorized_params} params"
+    )
+
+
+def test_shallow_layer_indices_selection():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from model import ShallowSpladeQuery
+    import transformers
+
+    VOCAB = 32
+
+    class FakeTokenizer:
+        pass
+
+    class FakeEncoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = torch.nn.ModuleList(
+                [torch.nn.Linear(2, 2, bias=False) for _ in range(12)]
+            )
+
+    class FakeBert(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = FakeEncoder()
+
+    class FakeMLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(vocab_size=VOCAB, num_hidden_layers=12)
+            self.bert = FakeBert()
+
+    fake_mlm = FakeMLM()
+    original_layers = list(fake_mlm.bert.encoder.layer)
+    with patch.object(transformers.AutoTokenizer, "from_pretrained", return_value=FakeTokenizer()), \
+         patch.object(transformers.AutoModelForMaskedLM, "from_pretrained", return_value=fake_mlm):
+        model = ShallowSpladeQuery("fake/splade", n_layers=3, layer_indices=[0, 6, 11])
+
+    assert model.layer_indices == [0, 6, 11]
+    assert model.n_layers == 3
+    assert model.original_n_layers == 12
+    assert list(model.mlm.bert.encoder.layer) == [
+        original_layers[0],
+        original_layers[6],
+        original_layers[11],
+    ], "selected layers should be first, seventh, and last"
+    print("  [PASS] ShallowSpladeQuery layer_indices — selected [0, 6, 11]")
+
+
+def test_splade_shallow_factorized_align_config():
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+    assert "splade_shallow_factorized_align" in cfg, "factorized config section missing"
+    sc = cfg["splade_shallow_factorized_align"]
+
+    assert sc["doc_splade_hf_id"] == "naver/splade-v3"
+    assert sc["n_layers"] == 3, "factorized stage should keep the working shallow depth"
+    assert sc["factorized_embedding_dim"] == 128, "default bottleneck should be 128"
+    assert sc["factorization_init"] == "svd", "factorized stage should preserve SPLADE lexical geometry at init"
+    assert sc["use_contrastive"] is False, "factorized smoke config should test the cheap non-contrastive path"
+    assert sc["log_ranking_metrics"] is False, "passage-encoding metrics should be off when contrastive is off"
+    assert sc["freeze_warmup_steps"] == 5_000, "warmup should match the working shallow setup"
+    assert sc["freeze_head_after_warmup"] is False, "factorized config should unfreeze lexical factors after warmup for this isolation run"
+    assert sc["head_lr_scale"] == 0.01, "factorized head/embedding LR should be very low after unfreeze"
+    assert sc["alignment_lr"] == cfg["splade_shallow_align"]["alignment_lr"]
+    assert sc["contrastive_coeff"] == cfg["splade_shallow_align"]["contrastive_coeff"]
+    assert sc["lambda_q_warmup_steps"] == cfg["splade_shallow_align"]["lambda_q_warmup_steps"]
+    print(
+        "  [PASS] splade_shallow_factorized_align config — "
+        f"dim={sc['factorized_embedding_dim']}, warmup={sc['freeze_warmup_steps']}, "
+        f"head_lr_scale={sc['head_lr_scale']}"
+    )
+
+
+def test_splade_shallow_factorized_spaced_align_config():
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+    assert "splade_shallow_factorized_spaced_align" in cfg, "spaced factorized config section missing"
+    sc = cfg["splade_shallow_factorized_spaced_align"]
+
+    assert sc["doc_splade_hf_id"] == "naver/splade-v3"
+    assert sc["n_layers"] == 3
+    assert sc["layer_indices"] == [0, 6, 11], "should use first, seventh, and last doc layers"
+    assert sc["factorized_embedding_dim"] == 128
+    assert sc["factorization_init"] == "svd"
+    assert sc["use_contrastive"] is False
+    assert sc["log_ranking_metrics"] is False
+    assert sc["freeze_head_after_warmup"] is True, "spaced experiment should keep factorized head frozen"
+    assert sc["output_dir"] == "splade_shallow_factorized_spaced_align"
+    print(
+        "  [PASS] splade_shallow_factorized_spaced_align config — "
+        f"layers={sc['layer_indices']}, frozen_head={sc['freeze_head_after_warmup']}"
+    )
+
+
+def test_splade_shallow_factorized_align_training_smoke():
+    import importlib.util
+    import tempfile
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import torch.utils.tensorboard as tensorboard_mod
+
+    spec = importlib.util.spec_from_file_location(
+        "train_mod_factorized_smoke", Path(__file__).parent / "train.py"
+    )
+    train_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(train_mod)
+
+    VOCAB = 32
+    ORIGINAL_LAYERS = 4
+    KEEP_LAYERS = 2
+    events = {"freeze": 0, "unfreeze": 0, "doc_encode": 0, "factorized_init": 0}
+
+    class FakeTokenizer:
+        def __call__(self, texts, **kwargs):
+            if isinstance(texts, str):
+                texts = [texts]
+            rows = len(texts)
+            return {
+                "input_ids": torch.arange(rows * 4).view(rows, 4) % 99,
+                "attention_mask": torch.ones(rows, 4, dtype=torch.long),
+            }
+
+    class FakeMLMOutput:
+        def __init__(self, logits):
+            self.logits = logits
+
+    class FakeEncoder(torch.nn.Module):
+        def __init__(self, n_layers):
+            super().__init__()
+            self.layer = torch.nn.ModuleList(
+                [torch.nn.Linear(HIDDEN, HIDDEN) for _ in range(n_layers)]
+            )
+
+    class FakeBert(torch.nn.Module):
+        def __init__(self, n_layers):
+            super().__init__()
+            self.encoder = FakeEncoder(n_layers)
+
+    class FakeMLM(torch.nn.Module):
+        def __init__(self, n_layers):
+            super().__init__()
+            self.embeddings = torch.nn.Embedding(100, HIDDEN)
+            self.bert = FakeBert(n_layers)
+            self.cls = torch.nn.Linear(HIDDEN, VOCAB)
+
+        def forward(self, input_ids, attention_mask=None):
+            h = self.embeddings(input_ids)
+            for layer in self.bert.encoder.layer:
+                h = torch.tanh(layer(h))
+            return FakeMLMOutput(self.cls(h))
+
+    class FakeShallowFactorizedSpladeQuery(torch.nn.Module):
+        def __init__(self, hf_id, n_layers, factorized_embedding_dim, init):
+            super().__init__()
+            events["factorized_init"] += 1
+            assert factorized_embedding_dim == 8
+            assert init == "svd"
+            self.tokenizer = FakeTokenizer()
+            self.mlm = FakeMLM(n_layers)
+            self.vocab_size = VOCAB
+            self.n_layers = n_layers
+            self.original_n_layers = ORIGINAL_LAYERS
+
+        def freeze_for_warmup(self):
+            events["freeze"] += 1
+            for p in self.parameters():
+                p.requires_grad_(False)
+            for p in self.mlm.bert.encoder.layer.parameters():
+                p.requires_grad_(True)
+
+        def unfreeze_all(self):
+            events["unfreeze"] += 1
+            for p in self.parameters():
+                p.requires_grad_(True)
+
+        def trainable_param_count(self):
+            return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        def factorized_param_count(self):
+            return VOCAB * 8 + 8 * HIDDEN + VOCAB
+
+        def encode(self, input_ids, attention_mask, override_k=0):
+            out = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
+            logits = out.logits * attention_mask.unsqueeze(-1).float()
+            return torch.log1p(torch.relu(logits).max(dim=1).values)
+
+    class FakeFrozenDocSPLADE(torch.nn.Module):
+        vocab_size = VOCAB
+
+        def __init__(self, hf_id):
+            super().__init__()
+            self.tokenizer = FakeTokenizer()
+
+        def encode(self, texts, max_length, **kwargs):
+            events["doc_encode"] += 1
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            rows = []
+            for text in texts:
+                idx = 0 if text.endswith("_0") else 1
+                vec = torch.zeros(VOCAB, device=device)
+                vec[idx] = 2.0
+                vec[(idx + 3) % VOCAB] = 0.5
+                rows.append(vec)
+            return torch.stack(rows, dim=0)
+
+    class FakeWriter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_scalar(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_loader(nway, batch_size):
+        assert nway == 3
+        def generate():
+            while True:
+                q_texts = [f"q{i}" for i in range(batch_size)]
+                p_texts = []
+                for i in range(batch_size):
+                    p_texts.extend([f"p{i}_0", f"p{i}_1", f"p{i}_2"])
+                yield q_texts, p_texts
+        return generate()
+
+    original_adamw = torch.optim.AdamW
+    adamw_lrs = []
+
+    class TrackingAdamW(original_adamw):
+        def __init__(self, params, *args, **kwargs):
+            super().__init__(params, *args, **kwargs)
+            adamw_lrs.append([group["lr"] for group in self.param_groups])
+
+    cfg = {
+        "splade_shallow_factorized_align": {
+            "doc_splade_hf_id": "fake/doc-splade",
+            "n_layers": KEEP_LAYERS,
+            "factorized_embedding_dim": 8,
+            "factorization_init": "svd",
+            "freeze_warmup_steps": 1,
+            "head_lr_scale": 0.1,
+            "alignment_steps": 2,
+            "alignment_lr": 2e-4,
+            "weight_decay": 0.01,
+            "fp16": False,
+            "lambda_q": 0.0001,
+            "lambda_q_warmup_steps": 1,
+            "use_contrastive": False,
+            "log_ranking_metrics": False,
+            "contrastive_coeff": 0.1,
+            "contrastive_temperature": 1.0,
+            "nway": 3,
+            "batch_size": 2,
+            "gradient_accumulation_steps": 1,
+            "query_max_length": 8,
+            "doc_max_length": 8,
+            "eval_batch_size": 4,
+            "log_every": 1,
+            "save_every": 100,
+            "output_dir": "factorized_smoke",
+        },
+        "eval": {"datasets": []},
+    }
+
+    import model as model_mod
+    import data as data_mod
+
+    old_adamw = torch.optim.AdamW
+    old_writer = tensorboard_mod.SummaryWriter
+    try:
+        torch.optim.AdamW = TrackingAdamW
+        tensorboard_mod.SummaryWriter = FakeWriter
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(model_mod, "FrozenDocSPLADE", FakeFrozenDocSPLADE), \
+             patch.object(model_mod, "ShallowFactorizedSpladeQuery", FakeShallowFactorizedSpladeQuery), \
+             patch.object(data_mod, "make_ranking_distill_loader", fake_loader):
+            train_mod._model_ckpt_root = lambda hf_id: Path(tmp)
+            train_mod.train_splade_shallow_factorized_align(cfg)
+    finally:
+        torch.optim.AdamW = old_adamw
+        tensorboard_mod.SummaryWriter = old_writer
+
+    assert events["factorized_init"] == 1, "factorized query class was not used"
+    assert events["freeze"] == 1, "warmup freeze_for_warmup was not called exactly once"
+    assert events["unfreeze"] == 1, "phase-boundary unfreeze_all was not called exactly once"
+    assert events["doc_encode"] == 2, \
+        f"non-contrastive path should only encode teacher queries once per step, got {events['doc_encode']}"
+    assert len(adamw_lrs) >= 2, "expected warmup optimizer and phase-1 optimizer"
+    phase1_lrs = adamw_lrs[1]
+    assert len(phase1_lrs) == 2, f"phase-1 optimizer should have body/head groups, got {phase1_lrs}"
+    assert abs(phase1_lrs[1] / phase1_lrs[0] - 0.1) < 1e-6, \
+        f"head LR should be 0.1x body LR, got {phase1_lrs}"
+    print(
+        "  [PASS] splade_shallow_factorized_align loop — "
+        f"factorized_init={events['factorized_init']}, "
+        f"phase1_lrs={[f'{lr:.2e}' for lr in phase1_lrs]}, "
+        f"doc_calls={events['doc_encode']}"
+    )
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 TESTS = [
@@ -960,6 +1564,13 @@ TESTS = [
     ("VocabTransplantQuerySPLADE encode + grad", test_vocab_transplant_model),
     ("Full vocab_transplant loop + eval", test_full_vocab_transplant_loop),
     ("vocab_transplant_align standalone loop + eval", test_vocab_transplant_align),
+    ("splade_shallow_align_distill config", test_splade_shallow_align_distill_config),
+    ("splade_shallow_align_distill training smoke", test_splade_shallow_align_distill_training_smoke),
+    ("factorized embedding/head tying", test_factorized_embedding_head_tying),
+    ("ShallowSpladeQuery layer_indices", test_shallow_layer_indices_selection),
+    ("splade_shallow_factorized_align config", test_splade_shallow_factorized_align_config),
+    ("splade_shallow_factorized_spaced_align config", test_splade_shallow_factorized_spaced_align_config),
+    ("splade_shallow_factorized_align training smoke", test_splade_shallow_factorized_align_training_smoke),
 ]
 
 if __name__ == "__main__":

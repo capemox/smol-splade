@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import math
 import sys
@@ -330,18 +331,40 @@ def mrr_at_k(ranked, qrels, query_ids, k=10):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
-    """Load a shallow query model (ShallowSpladeQuery or ShallowLionQuery) from a checkpoint."""
+    """Load a shallow query model from a checkpoint."""
     import torch
     if stage == "splade_shallow_align":
         from model import ShallowSpladeQuery
         hf_id = sc["doc_splade_hf_id"]
         print(f"Loading ShallowSpladeQuery ({sc['n_layers']} layers) from {checkpoint} ...")
-        model = ShallowSpladeQuery(hf_id, sc["n_layers"])
-    else:
+        model = ShallowSpladeQuery(
+            hf_id,
+            sc["n_layers"],
+            layer_indices=sc.get("layer_indices"),
+        )
+    elif stage in ("splade_shallow_factorized_align", "splade_shallow_factorized_spaced_align"):
+        from model import ShallowFactorizedSpladeQuery
+        hf_id = sc["doc_splade_hf_id"]
+        print(
+            f"Loading ShallowFactorizedSpladeQuery ({sc['n_layers']} layers, "
+            f"factor_dim={sc.get('factorized_embedding_dim', 128)}, "
+            f"layers={sc.get('layer_indices', list(range(sc['n_layers'])))}"
+            f") from {checkpoint} ..."
+        )
+        model = ShallowFactorizedSpladeQuery(
+            hf_id,
+            sc["n_layers"],
+            factorized_embedding_dim=sc.get("factorized_embedding_dim", 128),
+            init=sc.get("factorization_init", "svd"),
+            layer_indices=sc.get("layer_indices"),
+        )
+    elif stage == "lion_shallow_align":
         from model import ShallowLionQuery
         hf_id = sc["lion_hf_id"]
         print(f"Loading ShallowLionQuery ({sc['n_layers']} layers) from {checkpoint} ...")
         model = ShallowLionQuery(hf_id, sc["n_layers"])
+    else:
+        raise ValueError(f"Unsupported shallow stage: {stage}")
     ckpt = torch.load(checkpoint, map_location="cpu")
     model.load_state_dict(ckpt["model"])
     model.to(device).eval()
@@ -358,7 +381,13 @@ def main():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
         "--stage", default="vocab_transplant",
-        choices=["vocab_transplant", "splade_shallow_align", "lion_shallow_align"],
+        choices=[
+            "vocab_transplant",
+            "splade_shallow_align",
+            "splade_shallow_factorized_align",
+            "splade_shallow_factorized_spaced_align",
+            "lion_shallow_align",
+        ],
         help="Model type to evaluate (selects config section and model class)",
     )
     parser.add_argument(
@@ -405,12 +434,21 @@ def main():
     query_ids, query_texts, qrels = load_dev_queries_and_qrels()
 
     # ── Stage-specific model + config setup ───────────────────────────────────
-    if args.stage in ("splade_shallow_align", "lion_shallow_align"):
+    if args.stage in (
+        "splade_shallow_align",
+        "splade_shallow_factorized_align",
+        "splade_shallow_factorized_spaced_align",
+        "lion_shallow_align",
+    ):
         sc = cfg[args.stage]
         query_max_length = sc["query_max_length"]
         doc_max_length = sc["doc_max_length"]
 
-        if args.stage == "splade_shallow_align":
+        if args.stage in (
+            "splade_shallow_align",
+            "splade_shallow_factorized_align",
+            "splade_shallow_factorized_spaced_align",
+        ):
             from model import FrozenDocSPLADE
             doc_hf_id = sc["doc_splade_hf_id"]
             print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
@@ -448,7 +486,7 @@ def main():
             query_model.cpu()
             torch.cuda.empty_cache()
             del query_model
-            import gc; gc.collect()
+            gc.collect()
             ckpt_label = args.checkpoint
 
         corpus_dataset = cfg["sae"]["corpus_dataset"]
@@ -477,7 +515,7 @@ def main():
             )
             corpus_label = f"{n_indexed:,}-passage on-disk index"
         else:
-            import pickle, gc
+            import pickle
             subset_cache = Path("data") / f"msmarco_dev_subset_{args.max_corpus_size}.pkl"
             if subset_cache.exists():
                 print(f"Loading corpus subset from cache {subset_cache} ...")
@@ -549,13 +587,13 @@ def main():
             query_model.cpu()
             torch.cuda.empty_cache()
             del query_model
-            import gc; gc.collect()
+            gc.collect()
             ckpt_label = args.checkpoint
 
         corpus_dataset = cfg["sae"]["corpus_dataset"]
 
         if args.max_corpus_size > 0:
-            import pickle, gc
+            import pickle
             subset_cache = Path("data") / f"msmarco_dev_subset_{args.max_corpus_size}.pkl"
             if subset_cache.exists():
                 print(f"Loading corpus subset from cache {subset_cache} ...")

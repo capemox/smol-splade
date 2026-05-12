@@ -397,7 +397,7 @@ class ShallowSpladeQuery(nn.Module):
             Must be ``≤`` the model's ``num_hidden_layers``.
     """
 
-    def __init__(self, hf_id: str, n_layers: int):
+    def __init__(self, hf_id: str, n_layers: int, layer_indices: Optional[List[int]] = None):
         super().__init__()
         from transformers import AutoModelForMaskedLM, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
@@ -416,8 +416,22 @@ class ShallowSpladeQuery(nn.Module):
             raise ValueError(
                 f"n_layers={n_layers} must be in [1, {original_n}]"
             )
+        if layer_indices is not None:
+            if len(layer_indices) != n_layers:
+                raise ValueError(
+                    f"layer_indices length ({len(layer_indices)}) must match n_layers={n_layers}"
+                )
+            if any(idx < 0 or idx >= original_n for idx in layer_indices):
+                raise ValueError(
+                    f"layer_indices={layer_indices} must all be in [0, {original_n - 1}]"
+                )
+            selected_layers = [self.mlm.bert.encoder.layer[idx] for idx in layer_indices]
+            self.layer_indices: List[int] = list(layer_indices)
+        else:
+            selected_layers = list(self.mlm.bert.encoder.layer)[:n_layers]
+            self.layer_indices = list(range(n_layers))
         self.mlm.bert.encoder.layer = nn.ModuleList(
-            list(self.mlm.bert.encoder.layer)[:n_layers]
+            selected_layers
         )
         self.mlm.config.num_hidden_layers = n_layers
         self.n_layers: int = n_layers
@@ -462,6 +476,132 @@ class ShallowSpladeQuery(nn.Module):
         out = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
         logits = out.logits * attention_mask.unsqueeze(-1).float()
         return torch.log1p(torch.relu(logits).max(dim=1).values)
+
+
+class FactorizedWordEmbeddings(nn.Module):
+    """ALBERT-style factorized token embeddings for BERT.
+
+    Stores a lexical table ``A`` with shape ``[vocab, factor_dim]`` and an
+    up-projection ``B`` with shape ``[factor_dim, hidden]``. The effective
+    embedding matrix is ``A @ B`` but it is never materialized during normal
+    forward passes.
+    """
+
+    def __init__(self, vocab_size: int, hidden_size: int, factor_dim: int, padding_idx: int | None = None):
+        super().__init__()
+        self.lexical_embeddings = nn.Embedding(vocab_size, factor_dim, padding_idx=padding_idx)
+        self.up_project = nn.Linear(factor_dim, hidden_size, bias=False)
+        self.embedding_dim = hidden_size
+        self.num_embeddings = vocab_size
+        self.padding_idx = padding_idx
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.lexical_embeddings.weight @ self.up_project.weight.T
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.up_project(self.lexical_embeddings(input_ids))
+
+
+class FactorizedBertDecoder(nn.Module):
+    """Decoder tied to :class:`FactorizedWordEmbeddings` in factorized form."""
+
+    def __init__(self, factorized_embeddings: FactorizedWordEmbeddings, bias: torch.Tensor | None = None):
+        super().__init__()
+        self.factorized_embeddings = factorized_embeddings
+        vocab_size = factorized_embeddings.num_embeddings
+        if bias is None:
+            self.bias = nn.Parameter(torch.zeros(vocab_size))
+        elif isinstance(bias, nn.Parameter):
+            self.bias = bias
+        else:
+            self.bias = nn.Parameter(bias.detach().clone())
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.factorized_embeddings.weight
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        bottleneck = F.linear(hidden_states, self.factorized_embeddings.up_project.weight.T)
+        return F.linear(bottleneck, self.factorized_embeddings.lexical_embeddings.weight, self.bias)
+
+
+def _factorize_embedding_matrix(weight: torch.Tensor, factor_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``A, B`` such that ``A @ B`` approximates ``weight``.
+
+    ``weight`` is ``[vocab, hidden]``. ``A`` is ``[vocab, factor_dim]`` and
+    ``B`` is ``[factor_dim, hidden]``. Uses truncated SVD with the square root
+    of singular values split evenly between the two factors.
+    """
+    full = weight.detach().float().cpu()
+    vocab_size, hidden_size = full.shape
+    if factor_dim <= 0 or factor_dim > min(vocab_size, hidden_size):
+        raise ValueError(f"factor_dim={factor_dim} must be in [1, {min(vocab_size, hidden_size)}]")
+    U, S, Vh = torch.linalg.svd(full, full_matrices=False)
+    sqrt_s = S[:factor_dim].sqrt()
+    A = U[:, :factor_dim] * sqrt_s.unsqueeze(0)
+    B = sqrt_s.unsqueeze(1) * Vh[:factor_dim, :]
+    return A.contiguous(), B.contiguous()
+
+
+class ShallowFactorizedSpladeQuery(ShallowSpladeQuery):
+    """Shallow SPLADE query with ALBERT-style factorized embedding/head matrix.
+
+    The factorized lexical table is shared between input embeddings and the MLM
+    decoder:
+
+    ``input: token_id -> A[token_id] -> B -> hidden``
+    ``output: hidden -> B.T -> A.T -> vocab logits``
+
+    This preserves the original SPLADE vocabulary/output dimensionality while
+    reducing the parameter floor from the tied ``[vocab, hidden]`` matrix.
+    """
+
+    def __init__(
+        self,
+        hf_id: str,
+        n_layers: int,
+        factorized_embedding_dim: int = 128,
+        init: str = "svd",
+        layer_indices: Optional[List[int]] = None,
+    ):
+        super().__init__(hf_id, n_layers, layer_indices=layer_indices)
+        self.factorized_embedding_dim = int(factorized_embedding_dim)
+        self.factorization_init = init
+        self._install_factorized_embeddings(init=init)
+
+    def _install_factorized_embeddings(self, init: str = "svd") -> None:
+        old_embeddings = self.mlm.bert.embeddings.word_embeddings
+        old_weight = old_embeddings.weight.detach()
+        vocab_size, hidden_size = old_weight.shape
+        padding_idx = getattr(old_embeddings, "padding_idx", None)
+
+        factorized = FactorizedWordEmbeddings(
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            factor_dim=self.factorized_embedding_dim,
+            padding_idx=padding_idx,
+        )
+        if init == "svd":
+            A, B = _factorize_embedding_matrix(old_weight, self.factorized_embedding_dim)
+            factorized.lexical_embeddings.weight.data.copy_(A.to(old_weight.device, dtype=old_weight.dtype))
+            factorized.up_project.weight.data.copy_(B.T.to(old_weight.device, dtype=old_weight.dtype))
+        elif init == "random":
+            nn.init.normal_(factorized.lexical_embeddings.weight, mean=0.0, std=self.mlm.config.initializer_range)
+            nn.init.normal_(factorized.up_project.weight, mean=0.0, std=self.mlm.config.initializer_range)
+        else:
+            raise ValueError(f"Unknown factorized embedding init: {init}")
+
+        self.mlm.bert.embeddings.word_embeddings = factorized
+
+        old_bias = getattr(self.mlm.cls.predictions, "bias", None)
+        decoder = FactorizedBertDecoder(factorized, bias=old_bias)
+        self.mlm.cls.predictions.decoder = decoder
+        self.mlm.cls.predictions.bias = decoder.bias
+
+    def factorized_param_count(self) -> int:
+        emb = self.mlm.bert.embeddings.word_embeddings
+        return emb.lexical_embeddings.weight.numel() + emb.up_project.weight.numel() + emb.num_embeddings
 
 
 class FrozenLionSPLADE(nn.Module):

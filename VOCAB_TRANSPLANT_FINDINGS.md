@@ -117,6 +117,70 @@ Result: **fails**. Having the correct MLM head in isolation is not sufficient �
 tokensurgeon initializing the embedding table, the backbone cannot learn to produce
 hidden states the frozen head can interpret well.
 
+### Approach 8 — Shallow SPLADE Query Alignment
+Instead of crossing vocabularies or architectures, build the query encoder by loading
+`naver/splade-v3` and truncating the body to the first `n_layers` while keeping the
+same tokenizer, embedding table, and MLM head. The frozen document encoder remains
+the full `naver/splade-v3`; only the shallow query side is trained.
+
+This is currently the most reliable SPLADE-v3-side setup. The working recipe uses:
+- a 5k-step warmup where embeddings/head stay frozen and only the retained body
+  layers train;
+- phase-1 unfreezing with embeddings/head at a lower LR (`head_lr_scale=0.1`);
+- teacher-vector MSE against the full SPLADE query vector with an STE through ReLU;
+- query L1 sparsity;
+- a contrastive CE term over Tevatron positives plus hard negatives. The student
+  query scores frozen full-SPLADE passage vectors, so the document encoder stays fixed
+  while the query side gets direct retrieval-margin supervision.
+
+Result: **works well and trains stably**. The contrastive term is important because
+pure teacher-vector matching only asks the shallow model to imitate query vectors,
+whereas the contrastive term also teaches which frozen passage vectors should be
+separated for each query. This is the best path so far for a practical lightweight
+SPLADE-v3 query encoder.
+
+### Approach 9 — Shallow SPLADE + Cross-Encoder MarginMSE Distillation
+We tried a more traditional SPLADE-v3-style distillation objective in
+`splade_shallow_align_distill`: keep the same shallow query architecture and frozen
+full SPLADE document encoder, but replace the contrastive/vector-MSE recipe with
+cross-encoder margin distillation:
+
+```
+CE(q, positive) - CE(q, negative)
+  ≈ dot(q_shallow, d_positive_full_splade)
+    - dot(q_shallow, d_negative_full_splade)
+```
+
+The first implementation used `cross-encoder/ms-marco-MiniLM-L6-v2` as a simple
+single teacher. SPLADE-v3 uses stronger teacher distillation, including
+SparseDistillKLDivLoss and SparseMarginMSELoss with an ensemble of rerankers, but
+we started with MarginMSE only for simplicity. We added the same shallow-query
+training mechanics that were necessary for the stable contrastive run: 5k frozen
+warmup, lower LR for embeddings/head after unfreeze, frozen full-SPLADE passage
+vectors, and query sparsity.
+
+Result: **decent retrieval but unstable sparse representations**. A representative
+10k-step run reached NanoMSMARCO NDCG@10 around 0.65 and NanoNFCorpus around 0.31,
+which is competitive with the stable contrastive run. However, `q_nnz` varied
+wildly across logged batches. Depending on scaling and sparsity settings it could
+collapse to ~2-5 active dimensions, or swing into tens/hundreds of active
+dimensions, even when evaluation looked good.
+
+Likely reason: MarginMSE is under-constrained for this asymmetric sparse setup.
+Cross-encoder logits have arbitrary scale, while frozen-SPLADE dot products are
+unbounded and can be matched by many different query-vector shapes. The model can
+satisfy a batch's positive-vs-negative margins by changing query mass and activating
+idiosyncratic dimensions, without preserving a stable SPLADE-like sparse support.
+Small per-step batches make this look even noisier in logs, but the nnz/flops
+swings are real. Adding a full-SPLADE query-vector anchor, clipping/rescaling CE
+margins, and tuning `lambda_q` improved the retrieval/scale tradeoff but did not
+remove the support instability.
+
+Conclusion: write this off for now as an unstable variant unless we revisit it with
+a stronger/listwise teacher, precomputed teacher scores, larger effective batches,
+or an explicit support/mass regularizer. The stable `splade_shallow_align`
+contrastive recipe remains the preferred setup.
+
 ---
 
 ## Vocab Transplant: Technical Implementation
@@ -224,6 +288,9 @@ magnitude: large activations are penalized strongly while small ones stabilize.
 | random_init_align (ettin-17m, random embed + KD + cosine) | fails | tokensurgeon init is load-bearing |
 | doc_head_align (ettin + proj + frozen doc head, KD + cosine) | fails | frozen head insufficient alone |
 | Joint CE + alignment fine-tuning | ~0.55–0.60 | does not improve over alignment-only |
+| splade_shallow_align (3-layer query + contrastive CE) | ~0.65 | stable lightweight SPLADE query path |
+| splade_shallow_align_distill (cross-encoder MarginMSE) | ~0.65 | decent eval, but unstable q_nnz/flops |
+| splade_shallow_factorized_spaced_align | ~0.69 | strongest factorized run; full MS MARCO NDCG@10 0.4438 vs 0.4657 doc-only ceiling |
 
 **Main finding**: cosine alignment warmup with tokensurgeon-initialized embeddings achieves
 ~0.61 NDCG@10 — approaching the ~0.64 doc-doc ceiling. Ranking fine-tuning does not improve
@@ -259,6 +326,10 @@ and in-batch hard negatives don't provide strong enough signal to push further.
 - **direct_align (bert-small)**: shared vocab, no transplant needed, KD warmup + cosine
   → underperforms. BERT architecture appears less suited than ettin here; also confirms
   that just sharing vocabulary without transplant is not the same as tokensurgeon init.
+- **splade_shallow_align_distill**: cross-encoder MarginMSE on frozen full-SPLADE passage
+  vectors → decent NanoBEIR retrieval, but unstable sparse support. The loss can match
+  CE margins with arbitrary query-vector mass/support, so q_nnz and FLOPs vary too much
+  for a reliable sparse retriever.
 
 ---
 
@@ -341,10 +412,92 @@ confirm that tokensurgeon's kNN embedding interpolation is the mechanism driving
 result — not just vocabulary size alignment or architecture choices. This makes the
 finding more crisply attributable and harder to dismiss as a hyperparameter accident.
 
+### Current stable path: shallow alignment
+
+The most stable and useful configs now are `splade_shallow_align` and
+`lion_shallow_align`. They avoid the brittle cross-vocabulary transplant problem
+by constructing the query encoder from the same checkpoint as the document
+encoder, then truncating the body to the first `n_layers`. The query side keeps
+the document tokenizer, embedding table, and output head, so query and document
+vectors live in the same sparse vocabulary space with no projection layer or
+tokensurgeon approximation.
+
+Both configs use a two-phase schedule: first freeze embeddings/head and train
+only the retained body layers, then fine-tune the lightweight query side. This
+has been stable during training and gives good results, unlike several earlier
+transplant and direct-alignment ablations that collapsed or plateaued.
+
+For `splade_shallow_align`, the active loss is teacher-vector MSE on SPLADE query
+vectors with an STE through ReLU, query L1 sparsity, and an optional contrastive
+CE term over Tevatron positives plus hard negatives. The contrastive term scores
+student queries against frozen full-SPLADE passage vectors, adding retrieval
+margin supervision while keeping the document encoder fixed.
+
+This contrastive setup has now been tested and is the stable SPLADE-v3-side
+lightweight-query recipe. The separate `splade_shallow_align_distill` experiment,
+which used cross-encoder MarginMSE instead of contrastive CE, produced competitive
+NanoBEIR scores but unstable `q_nnz`/FLOPs. The likely issue is not retrieval signal
+quality alone; it is that raw cross-encoder margins do not define a unique sparse
+query vector. They constrain score differences, not which SPLADE vocabulary
+dimensions should be active or how much query mass should be used.
+
+The next size-reduction experiment is `splade_shallow_factorized_align`: keep the
+proven shallow alignment recipe, but replace the tied `[vocab, hidden]` embedding
+/ MLM-head matrix with ALBERT-style shared factors. With SPLADE-v3 dimensions this
+turns the lexical parameter floor from roughly `30,522 * 768` parameters into
+`30,522 * factorized_embedding_dim + factorized_embedding_dim * 768` while
+preserving the same output vocabulary. The default factorized dimension is 128 and
+the factors are initialized by SVD from the original tied matrix.
+
+Factorized runs exposed a separate issue from ordinary shallow alignment. With
+contrastive training enabled and the shared factors unfrozen after warmup, `q_nnz`
+kept climbing even when activation mass stayed modest. That means the model was
+creating many tiny positive dimensions: the L1 sparsity term penalizes total
+mass, while `q_nnz` counts any dimension barely above zero.
+
+The strongest factorized variant so far keeps the factorized embedding / SPLADE
+head frozen for the full run and trains only the retained transformer body. This
+worked surprisingly well, suggesting that the SVD-initialized lexical factors are
+already a good enough approximation of the SPLADE-v3 lexical basis, and that most
+of the useful adaptation should happen in the shallow body rather than by moving
+the shared lexical factors.
+
+A follow-up isolation run disabled contrastive training and unfroze the
+factorized embedding/head after 5k steps with a much lower LR
+(`head_lr_scale: 0.01`, roughly `2e-6` when the body LR is `2e-4`). That setup
+does work and gives good results, but it is still weaker than keeping the
+factorized SPLADE head frozen throughout. So contrastive loss was not the whole
+problem; moving the factorized lexical basis itself appears to be risky even at a
+small learning rate.
+
+Because contrastive training encodes `batch_size * nway` frozen SPLADE passages
+on every microstep, factorized runs currently use `use_contrastive: false` and
+`log_ranking_metrics: false` for cheap iteration. That recovers the older
+teacher-query MSE setup; periodic NanoBEIR eval still measures retrieval quality.
+
+New follow-up: `splade_shallow_factorized_spaced_align` keeps the same frozen
+factorized lexical factors/head and non-contrastive loss, but builds the 3-layer
+query body from doc layers `[0, 6, 11]` instead of the first three contiguous
+layers. This tests whether a shallow query benefits from retaining one early,
+one middle, and the final SPLADE-adapted transformer block.
+
+This is now the strongest factorized SPLADE-v3-side result. At 50k steps it
+reached about `0.6928` NanoMSMARCO NDCG@10 and `0.3333` NanoNFCorpus NDCG@10.
+On full MS MARCO dev with the 8.8M-passage index, the final checkpoint reached:
+
+| Configuration | MSMARCO Dev NDCG@10 | MSMARCO Dev MRR@10 | Notes |
+|---|---:|---:|---|
+| `naver/splade-v3` doc-only ceiling | 0.4657 | 0.3989 | Same SPLADE-v3 model encodes queries and docs. |
+| `splade_shallow_factorized_spaced_align` | 0.4438 | 0.3787 | 3-layer `[0, 6, 11]` factorized query, frozen lexical factors/head. |
+
+The factorized spaced query keeps about `95.3%` of the SPLADE-v3 doc-only
+NDCG@10 and about `94.9%` of its MRR@10 while using a much smaller query-side
+model. The remaining gap is roughly `-0.0219` NDCG@10 and `-0.0202` MRR@10.
+
 ### Weakest points
 
-- Results are currently only on NanoBEIR (50 queries). Full MSMARCO dev needed before
-  any claim is credible.
+- The strongest factorized shallow result now has a full MS MARCO dev number,
+  but older vocab-transplant and Lion results are still mostly NanoBEIR-only.
 - The ranking fine-tuning appears not to improve over alignment alone, which is either
   a genuine finding or a training failure. Until this is resolved it's unclear whether
   the method "works" or is stuck.
@@ -372,13 +525,19 @@ uv run train.py vocab_transplant --config config.yaml
 Run full MSMARCO eval on an alignment checkpoint:
 ```bash
 uv run scripts/eval_msmarco.py \
-    --checkpoint checkpoints_ettin-encoder-68m/vocab_transplant/align_step_10000.pt \
-    --max_corpus_size 200000
+    --stage splade_shallow_factorized_spaced_align \
+    --checkpoint checkpoints_splade-v3/splade_shallow_factorized_spaced_align/align_final.pt \
+    --config config.yaml \
+    --index_dir data/msmarco_index
 ```
 
 Run doc-only upper bound:
 ```bash
-uv run scripts/eval_msmarco.py --doc_only
+uv run scripts/eval_msmarco.py \
+    --stage splade_shallow_align \
+    --doc_only \
+    --config config.yaml \
+    --index_dir data/msmarco_index
 ```
 
 ---

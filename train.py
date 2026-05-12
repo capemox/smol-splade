@@ -2492,7 +2492,13 @@ def _save_splade(model, optimizer, scheduler, step, path):
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: str | None = None):
+def train_splade_shallow_align(
+    cfg: dict,
+    resume: str | None = None,
+    init_from: str | None = None,
+    section: str = "splade_shallow_align",
+    factorized: bool = False,
+):
     """Layer-truncated SPLADE query encoder, distilled against the full doc encoder.
 
     Both encoders share tokenizer, embeddings, and MLM head. Only the body is
@@ -2507,22 +2513,23 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
         target distribution to adapt to.
       Phase 1 — full fine-tuning: everything trainable.
 
-    Loss is the same cos + softmax-KL recipe that worked for ettin's
-    vocab_transplant_align: cosine on the SPLADE vectors plus a small KL on
-    raw max-pooled logits as a recovery gradient. Reads its config from the
-    ``splade_shallow_align`` section.
+    Loss is teacher-vector MSE on SPLADE query vectors, optionally augmented
+    with a contrastive CE term against frozen teacher passage vectors. The
+    contrastive term uses Tevatron positives and hard negatives, so it adds a
+    ranking signal without making the full doc encoder trainable. Reads its
+    config from the ``splade_shallow_align`` section.
     """
     from torch.cuda.amp import GradScaler, autocast
     from torch.utils.tensorboard import SummaryWriter
     import torch.nn.functional as F
 
-    from model import FrozenDocSPLADE, ShallowSpladeQuery
+    from model import FrozenDocSPLADE, ShallowFactorizedSpladeQuery, ShallowSpladeQuery
     from eval import evaluate_asymmetric
     from data import make_ranking_distill_loader
 
-    if "splade_shallow_align" not in cfg:
-        raise SystemExit("[shallow] config.yaml is missing a `splade_shallow_align:` section.")
-    sc = cfg["splade_shallow_align"]
+    if section not in cfg:
+        raise SystemExit(f"[shallow] config.yaml is missing a `{section}:` section.")
+    sc = cfg[section]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -2532,9 +2539,13 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
     align_lr            = float(sc.get("alignment_lr", 5e-4))
     weight_decay        = float(sc.get("weight_decay", 0.01))
     fp16                = bool(sc.get("fp16", True))
-    kd_temperature        = float(sc.get("kd_temperature", 1.0))
     lambda_q              = float(sc.get("lambda_q", 0.0))
     lambda_q_warmup_steps = int(sc.get("lambda_q_warmup_steps", 0))
+    use_contrastive       = bool(sc.get("use_contrastive", sc.get("contrastive_coeff", 0.0) > 0.0))
+    contrastive_coeff     = float(sc.get("contrastive_coeff", 0.0)) if use_contrastive else 0.0
+    contrastive_temperature = float(sc.get("contrastive_temperature", 1.0))
+    log_ranking_metrics   = bool(sc.get("log_ranking_metrics", use_contrastive))
+    freeze_head_after_warmup = bool(sc.get("freeze_head_after_warmup", False))
     nway                  = int(sc.get("nway", 8))
     grad_accum          = int(sc.get("gradient_accumulation_steps", 1))
     if alignment_steps <= 0:
@@ -2542,11 +2553,15 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
     if freeze_warmup_steps < 0 or freeze_warmup_steps > alignment_steps:
         raise SystemExit("[shallow] freeze_warmup_steps must be in [0, alignment_steps].")
 
+    if contrastive_temperature <= 0.0:
+        raise SystemExit("[shallow] contrastive_temperature must be > 0.")
     print(
         f"[shallow] doc={sc['doc_splade_hf_id']} | n_layers={n_layers} "
         f"| freeze_warmup={freeze_warmup_steps} | alignment={alignment_steps} "
         f"| lr={align_lr} | nway={nway} | lambda_q={lambda_q} "
-        f"| T={kd_temperature} | grad_accum={grad_accum}"
+        f"| use_contrastive={use_contrastive} | contrastive_coeff={contrastive_coeff} "
+        f"| log_ranking_metrics={log_ranking_metrics} | grad_accum={grad_accum} "
+        f"| freeze_head_after_warmup={freeze_head_after_warmup}"
     )
 
     # ── Models ────────────────────────────────────────────────────────
@@ -2554,7 +2569,31 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
     doc_splade = FrozenDocSPLADE(sc["doc_splade_hf_id"]); doc_splade.to(device); doc_splade.eval()
 
     print(f"[shallow] Building shallow query model from same checkpoint, keeping {n_layers} layers …")
-    query_model = ShallowSpladeQuery(sc["doc_splade_hf_id"], n_layers=n_layers); query_model.to(device)
+    layer_indices = sc.get("layer_indices")
+    if layer_indices is not None:
+        layer_indices = [int(idx) for idx in layer_indices]
+        print(f"[shallow] Using explicit doc-layer indices for query body: {layer_indices}")
+    if factorized:
+        factor_dim = int(sc.get("factorized_embedding_dim", 128))
+        factor_init = sc.get("factorization_init", "svd")
+        query_kwargs = {
+            "n_layers": n_layers,
+            "factorized_embedding_dim": factor_dim,
+            "init": factor_init,
+        }
+        if layer_indices is not None:
+            query_kwargs["layer_indices"] = layer_indices
+        query_model = ShallowFactorizedSpladeQuery(sc["doc_splade_hf_id"], **query_kwargs)
+        print(
+            f"[shallow] Installed factorized lexical matrix: dim={factor_dim} "
+            f"init={factor_init} factorized_params={query_model.factorized_param_count()/1e6:.1f}M"
+        )
+    else:
+        query_kwargs = {"n_layers": n_layers}
+        if layer_indices is not None:
+            query_kwargs["layer_indices"] = layer_indices
+        query_model = ShallowSpladeQuery(sc["doc_splade_hf_id"], **query_kwargs)
+    query_model.to(device)
     query_tokenizer = query_model.tokenizer
     n_total = sum(p.numel() for p in query_model.parameters())
     n_trainable_full = n_total
@@ -2578,9 +2617,10 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
 
     # ── Initial trainability based on phase at start_step ─────────────
     in_warmup = start_step < freeze_warmup_steps
-    if in_warmup:
+    if in_warmup or freeze_head_after_warmup:
         query_model.freeze_for_warmup()
-        print(f"[shallow] Phase 0 (frozen warmup). Trainable params: "
+        phase_msg = "Phase 0 (frozen warmup)" if in_warmup else "Phase 1 with head kept frozen"
+        print(f"[shallow] {phase_msg}. Trainable params: "
               f"{query_model.trainable_param_count()/1e6:.1f}M / {n_trainable_full/1e6:.1f}M total.")
     else:
         query_model.unfreeze_all()
@@ -2619,7 +2659,7 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
         evaluate_asymmetric(
             query_model, query_tokenizer, doc_splade, cfg, device,
             writer=writer, step=0, run_doc_doc=True, override_k=0,
-            section="splade_shallow_align",
+            section=section,
         )
         gc.collect(); torch.cuda.empty_cache()
 
@@ -2632,18 +2672,25 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
     for step in range(start_step, alignment_steps):
         # ── Phase boundary: unfreeze everything ───────────────────────
         if in_warmup and step >= freeze_warmup_steps:
-            query_model.unfreeze_all()
             current_lr = optimizer.param_groups[0]["lr"]
-            head_lr_scale = float(sc.get("head_lr_scale", 0.1))
-            # Two param groups: body layers at full LR, embeddings + MLM head at
-            # a fraction. This prevents co-adaptation instability right after unfreeze.
             body_params = list(query_model.mlm.bert.encoder.layer.parameters())
-            body_ids = {id(p) for p in body_params}
-            head_params = [p for p in query_model.parameters() if id(p) not in body_ids]
-            optimizer = torch.optim.AdamW([
-                {"params": body_params, "lr": current_lr},
-                {"params": head_params, "lr": current_lr * head_lr_scale},
-            ], weight_decay=weight_decay)
+            if freeze_head_after_warmup:
+                query_model.freeze_for_warmup()
+                optimizer = torch.optim.AdamW(
+                    body_params, lr=current_lr, weight_decay=weight_decay,
+                )
+                head_lr_scale = 0.0
+            else:
+                query_model.unfreeze_all()
+                head_lr_scale = float(sc.get("head_lr_scale", 0.1))
+                # Two param groups: body layers at full LR, embeddings + MLM head at
+                # a fraction. This prevents co-adaptation instability right after unfreeze.
+                body_ids = {id(p) for p in body_params}
+                head_params = [p for p in query_model.parameters() if id(p) not in body_ids]
+                optimizer = torch.optim.AdamW([
+                    {"params": body_params, "lr": current_lr},
+                    {"params": head_params, "lr": current_lr * head_lr_scale},
+                ], weight_decay=weight_decay)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=alignment_steps - freeze_warmup_steps, eta_min=1e-5,
             )
@@ -2667,15 +2714,17 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
         with torch.no_grad():
             # Teacher query vecs needed every step for the loss.
             t_q_vecs = doc_splade.encode(q_texts, sc["query_max_length"]).float()  # [B, V]
-            # Passage vecs only needed for p@1 logging — skip on non-log steps.
+            # Passage vecs are needed for contrastive training and optional p@1 logging.
             # Encode in chunks to avoid OOM when training batch_size is large.
-            if do_log:
+            need_passage_vecs = contrastive_coeff > 0.0 or (do_log and log_ranking_metrics)
+            if need_passage_vecs:
                 enc_bs = sc.get("eval_batch_size", 32)
                 p_vecs = torch.cat([
                     doc_splade.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
                     for i in range(0, len(p_texts), enc_bs)
                 ], dim=0)
                 p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+            if do_log and log_ranking_metrics:
                 t_scores = (t_q_vecs.unsqueeze(1) * p_vecs_3d).sum(-1)  # [B, nway]
 
         with autocast(enabled=fp16 and device.type == "cuda"):
@@ -2693,6 +2742,19 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
             # instead of O(1/(B*V)), which is strong enough to revive dead dims from zero.
             rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
             align_loss = rank_loss
+            if contrastive_coeff > 0.0:
+                # In-batch contrastive loss: each query's positive passage is
+                # the first passage in its nway block; all other passages in
+                # the batch are negatives. Passage vectors stay frozen teacher
+                # outputs, keeping the extra signal query-side only.
+                passage_vecs = p_vecs.to(q_vecs.dtype)
+                scores = q_vecs @ passage_vecs.T
+                scores = scores / contrastive_temperature
+                labels = torch.arange(B_actual, device=scores.device) * nway
+                contrastive_loss = F.cross_entropy(scores, labels)
+                align_loss = align_loss + contrastive_coeff * contrastive_loss
+            else:
+                contrastive_loss = q_vecs.new_tensor(0.0)
             if lambda_q > 0.0:
                 lq_scale = min(1.0, step / lambda_q_warmup_steps) if lambda_q_warmup_steps > 0 else 1.0
                 align_loss = align_loss + lq_scale * lambda_q * q_vecs.sum(-1).mean()
@@ -2716,22 +2778,29 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
                 q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
                 t_nnz = (t_q_vecs > 0).float().mean(0).sum().item()
                 flops = q_vecs.detach().abs().sum(-1).mean().item()
-                p_f = p_vecs_3d.to(q_vecs.dtype)
-                s_scores = (q_vecs.unsqueeze(1) * p_f).sum(-1)
-                t_rank1 = t_scores.argmax(-1).eq(0).float().mean().item()
-                s_rank1 = s_scores.argmax(-1).eq(0).float().mean().item()
+                if log_ranking_metrics:
+                    p_f = p_vecs_3d.to(q_vecs.dtype)
+                    s_scores = (q_vecs.unsqueeze(1) * p_f).sum(-1)
+                    t_rank1 = t_scores.argmax(-1).eq(0).float().mean().item()
+                    s_rank1 = s_scores.argmax(-1).eq(0).float().mean().item()
+                    rank_msg = f" | p@1 s={s_rank1:.2f} t={t_rank1:.2f}"
+                else:
+                    s_rank1 = None
+                    rank_msg = ""
             print(
                 f"[shallow/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} "
-                f"(rank {rank_loss.item():.3f}) | "
-                f"q_nnz {q_nnz:.1f} (teacher {t_nnz:.1f}) | flops {flops:.1f} | "
-                f"p@1 s={s_rank1:.2f} t={t_rank1:.2f} | lr {lr:.2e} | {elapsed:.0f}s"
+                f"(rank {rank_loss.item():.3f} ctr {contrastive_loss.item():.3f}) | "
+                f"q_nnz {q_nnz:.1f} (teacher {t_nnz:.1f}) | flops {flops:.1f}"
+                f"{rank_msg} | lr {lr:.2e} | {elapsed:.0f}s"
             )
-            writer.add_scalar(f"splade_shallow_align/{phase}/loss", align_loss.item(), step + 1)
-            writer.add_scalar(f"splade_shallow_align/{phase}/rank_loss", rank_loss.item(), step + 1)
-            writer.add_scalar("splade_shallow_align/q_nnz", q_nnz, step + 1)
-            writer.add_scalar("splade_shallow_align/teacher_nnz", t_nnz, step + 1)
-            writer.add_scalar("splade_shallow_align/precision_at_1", s_rank1, step + 1)
-            writer.add_scalar("splade_shallow_align/lr", lr, step + 1)
+            writer.add_scalar(f"{section}/{phase}/loss", align_loss.item(), step + 1)
+            writer.add_scalar(f"{section}/{phase}/rank_loss", rank_loss.item(), step + 1)
+            writer.add_scalar(f"{section}/{phase}/contrastive_loss", contrastive_loss.item(), step + 1)
+            writer.add_scalar(f"{section}/q_nnz", q_nnz, step + 1)
+            writer.add_scalar(f"{section}/teacher_nnz", t_nnz, step + 1)
+            if s_rank1 is not None:
+                writer.add_scalar(f"{section}/precision_at_1", s_rank1, step + 1)
+            writer.add_scalar(f"{section}/lr", lr, step + 1)
             t0 = time.time()
 
         if (step + 1) % sc["save_every"] == 0:
@@ -2745,7 +2814,7 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
                 evaluate_asymmetric(
                     query_model, query_tokenizer, doc_splade, cfg, device,
                     writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
-                    section="splade_shallow_align",
+                    section=section,
                 )
                 query_model.train()
                 gc.collect(); torch.cuda.empty_cache()
@@ -2753,6 +2822,327 @@ def train_splade_shallow_align(cfg: dict, resume: str | None = None, init_from: 
     final_path = out_dir / "align_final.pt"
     torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
     print(f"[shallow] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_splade_shallow_factorized_align(cfg: dict, resume: str | None = None, init_from: str | None = None):
+    return train_splade_shallow_align(
+        cfg,
+        resume=resume,
+        init_from=init_from,
+        section="splade_shallow_factorized_align",
+        factorized=True,
+    )
+
+
+def train_splade_shallow_factorized_spaced_align(cfg: dict, resume: str | None = None, init_from: str | None = None):
+    return train_splade_shallow_align(
+        cfg,
+        resume=resume,
+        init_from=init_from,
+        section="splade_shallow_factorized_spaced_align",
+        factorized=True,
+    )
+
+
+def train_splade_shallow_align_distill(cfg: dict, resume: str | None = None, init_from: str | None = None):
+    """Layer-truncated SPLADE query encoder trained with cross-encoder MarginMSE.
+
+    This mirrors ``train_splade_shallow_align`` architecturally, but replaces
+    teacher-vector MSE + contrastive CE with a traditional reranker distillation
+    objective:
+
+      teacher_margin = CE(q, positive) - CE(q, negative)
+      student_margin = dot(q_student, d_positive_full_splade) - dot(q_student, d_negative_full_splade)
+
+    The document encoder remains frozen. Only the shallow query encoder learns.
+    Reads its config from ``splade_shallow_align_distill``.
+    """
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+    import torch.nn.functional as F
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    from model import FrozenDocSPLADE, ShallowSpladeQuery
+    from eval import evaluate_asymmetric
+    from data import make_ranking_distill_loader
+
+    if "splade_shallow_align_distill" not in cfg:
+        raise SystemExit("[shallow-distill] config.yaml is missing a `splade_shallow_align_distill:` section.")
+    sc = cfg["splade_shallow_align_distill"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    n_layers              = int(sc["n_layers"])
+    alignment_steps       = int(sc.get("alignment_steps", 50_000))
+    freeze_warmup_steps   = int(sc.get("freeze_warmup_steps", 5_000))
+    head_lr_scale         = float(sc.get("head_lr_scale", 0.1))
+    align_lr              = float(sc.get("alignment_lr", 2e-4))
+    weight_decay          = float(sc.get("weight_decay", 0.01))
+    fp16                  = bool(sc.get("fp16", True))
+    lambda_q              = float(sc.get("lambda_q", 0.0))
+    lambda_q_warmup_steps = int(sc.get("lambda_q_warmup_steps", 0))
+    query_anchor_coeff    = float(sc.get("query_anchor_coeff", 0.0))
+    teacher_margin_scale  = float(sc.get("teacher_margin_scale", 1.0))
+    teacher_margin_clip   = float(sc.get("teacher_margin_clip", 0.0))
+    nway                  = int(sc.get("nway", 8))
+    grad_accum            = int(sc.get("gradient_accumulation_steps", 1))
+    teacher_batch_size    = int(sc.get("teacher_batch_size", 32))
+    teacher_max_length    = int(sc.get("teacher_max_length", 512))
+    teacher_hf_id         = sc["cross_encoder_hf_id"]
+
+    if alignment_steps <= 0:
+        raise SystemExit("[shallow-distill] alignment_steps must be > 0.")
+    if freeze_warmup_steps < 0 or freeze_warmup_steps > alignment_steps:
+        raise SystemExit("[shallow-distill] freeze_warmup_steps must be in [0, alignment_steps].")
+    if nway < 2:
+        raise SystemExit("[shallow-distill] nway must be >= 2 for margin MSE.")
+
+    print(
+        f"[shallow-distill] doc={sc['doc_splade_hf_id']} | teacher={teacher_hf_id} "
+        f"| n_layers={n_layers} | freeze_warmup={freeze_warmup_steps} "
+        f"| alignment={alignment_steps} | lr={align_lr} | nway={nway} "
+        f"| lambda_q={lambda_q} | anchor={query_anchor_coeff} "
+        f"| margin_scale={teacher_margin_scale} | grad_accum={grad_accum}"
+    )
+
+    print(f"[shallow-distill] Loading frozen doc SPLADE: {sc['doc_splade_hf_id']} …")
+    doc_splade = FrozenDocSPLADE(sc["doc_splade_hf_id"]); doc_splade.to(device); doc_splade.eval()
+
+    print(f"[shallow-distill] Loading cross-encoder teacher: {teacher_hf_id} …")
+    ce_tokenizer = AutoTokenizer.from_pretrained(teacher_hf_id)
+    ce_model = AutoModelForSequenceClassification.from_pretrained(teacher_hf_id)
+    ce_model.to(device); ce_model.eval()
+    for p in ce_model.parameters():
+        p.requires_grad_(False)
+
+    print(f"[shallow-distill] Building shallow query model from same checkpoint, keeping {n_layers} layers …")
+    query_model = ShallowSpladeQuery(sc["doc_splade_hf_id"], n_layers=n_layers); query_model.to(device)
+    query_tokenizer = query_model.tokenizer
+    n_total = sum(p.numel() for p in query_model.parameters())
+    print(
+        f"[shallow-distill] Query model params: {n_total/1e6:.1f}M "
+        f"({n_layers}/{query_model.original_n_layers} layers kept)."
+    )
+
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = int(ckpt.get("step", 0))
+        print(f"[shallow-distill] Resumed from {resume} at step {start_step}")
+    elif init_from:
+        ckpt = torch.load(init_from, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        print(f"[shallow-distill] Initialised weights from {init_from} (step counter reset to 0)")
+
+    in_warmup = start_step < freeze_warmup_steps
+    if in_warmup:
+        query_model.freeze_for_warmup()
+        print(
+            f"[shallow-distill] Phase 0 (frozen warmup). Trainable params: "
+            f"{query_model.trainable_param_count()/1e6:.1f}M / {n_total/1e6:.1f}M"
+        )
+    else:
+        query_model.unfreeze_all()
+        print("[shallow-distill] Resuming directly into Phase 1 (everything trainable).")
+
+    optimizer = torch.optim.AdamW(
+        [p for p in query_model.parameters() if p.requires_grad],
+        lr=align_lr, weight_decay=weight_decay,
+    )
+    if start_step > 0:
+        for pg in optimizer.param_groups:
+            pg["initial_lr"] = align_lr
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=alignment_steps, eta_min=1e-5,
+        last_epoch=start_step - 1 if start_step > 0 else -1,
+    )
+    scaler = GradScaler(enabled=fp16 and device.type == "cuda")
+
+    out_dir = _model_ckpt_root(sc["doc_splade_hf_id"]) / sc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+    ranking_loader = make_ranking_distill_loader(nway=nway, batch_size=sc["batch_size"])
+
+    def score_cross_encoder(q_texts: list[str], p_texts: list[str]) -> torch.Tensor:
+        """Return teacher scores shaped [B, nway]."""
+        pairs = []
+        for i, query in enumerate(q_texts):
+            start = i * nway
+            for passage in p_texts[start:start + nway]:
+                pairs.append((query, passage))
+
+        scores = []
+        with torch.no_grad():
+            for i in range(0, len(pairs), teacher_batch_size):
+                batch_pairs = pairs[i:i + teacher_batch_size]
+                q_batch = [pair[0] for pair in batch_pairs]
+                p_batch = [pair[1] for pair in batch_pairs]
+                enc = ce_tokenizer(
+                    q_batch,
+                    p_batch,
+                    max_length=teacher_max_length,
+                    truncation=True,
+                    padding=True,
+                    return_tensors="pt",
+                )
+                enc = {k: v.to(device) for k, v in enc.items()}
+                with autocast(enabled=fp16 and device.type == "cuda"):
+                    logits = ce_model(**enc).logits
+                if logits.ndim == 2 and logits.shape[-1] > 1:
+                    batch_scores = logits[:, -1]
+                else:
+                    batch_scores = logits.view(-1)
+                scores.append(batch_scores.float())
+        return torch.cat(scores, dim=0).view(len(q_texts), nway)
+
+    if start_step == 0 and cfg.get("eval", {}).get("datasets"):
+        print("[shallow-distill] Initial eval — doc_doc ceiling + query_doc baseline …")
+        import gc; gc.collect(); torch.cuda.empty_cache()
+        evaluate_asymmetric(
+            query_model, query_tokenizer, doc_splade, cfg, device,
+            writer=writer, step=0, run_doc_doc=True, override_k=0,
+            section="splade_shallow_align_distill",
+        )
+        gc.collect(); torch.cuda.empty_cache()
+
+    query_model.train()
+    t0 = time.time()
+    print(f"[shallow-distill] Training loop ({alignment_steps - start_step} steps remaining) …")
+    optimizer.zero_grad()
+
+    for step in range(start_step, alignment_steps):
+        if in_warmup and step >= freeze_warmup_steps:
+            query_model.unfreeze_all()
+            current_lr = optimizer.param_groups[0]["lr"]
+            body_params = list(query_model.mlm.bert.encoder.layer.parameters())
+            body_ids = {id(p) for p in body_params}
+            head_params = [p for p in query_model.parameters() if id(p) not in body_ids]
+            optimizer = torch.optim.AdamW([
+                {"params": body_params, "lr": current_lr},
+                {"params": head_params, "lr": current_lr * head_lr_scale},
+            ], weight_decay=weight_decay)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=alignment_steps - freeze_warmup_steps, eta_min=1e-5,
+            )
+            optimizer.zero_grad()
+            in_warmup = False
+            print(
+                f"[shallow-distill] Step {step}: switched to Phase 1. "
+                f"body_lr={current_lr:.2e} head_lr={current_lr * head_lr_scale:.2e}"
+            )
+
+        do_log = (step + 1) % sc["log_every"] == 0
+        q_texts, p_texts = next(ranking_loader)
+        B_actual = len(q_texts)
+
+        q_enc = query_tokenizer(
+            q_texts, max_length=sc["query_max_length"],
+            truncation=True, padding=True, return_tensors="pt",
+        )
+        a_ids = q_enc["input_ids"].to(device)
+        a_mask = q_enc["attention_mask"].to(device)
+
+        with torch.no_grad():
+            teacher_scores = score_cross_encoder(q_texts, p_texts)
+            teacher_margins_raw = teacher_scores[:, :1] - teacher_scores[:, 1:]
+            teacher_margins = teacher_margins_raw * teacher_margin_scale
+            if teacher_margin_clip > 0.0:
+                teacher_margins = teacher_margins.clamp(-teacher_margin_clip, teacher_margin_clip)
+            if query_anchor_coeff > 0.0:
+                t_q_vecs = doc_splade.encode(q_texts, sc["query_max_length"]).float()
+            enc_bs = sc.get("eval_batch_size", 32)
+            p_vecs = torch.cat([
+                doc_splade.encode(p_texts[i:i + enc_bs], sc["doc_max_length"]).float()
+                for i in range(0, len(p_texts), enc_bs)
+            ], dim=0)
+            p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+
+        with autocast(enabled=fp16 and device.type == "cuda"):
+            raw = query_model.mlm(input_ids=a_ids, attention_mask=a_mask).logits
+            mask = a_mask.unsqueeze(-1).float()
+            q_logits = (raw + (1.0 - mask) * -1e6).max(dim=1).values
+
+            q_relu = q_logits + (F.relu(q_logits) - q_logits).detach()
+            q_vecs = torch.log1p(q_relu)
+
+            passage_vecs = p_vecs_3d.to(q_vecs.dtype)
+            student_scores = (q_vecs.unsqueeze(1) * passage_vecs).sum(-1)
+            student_margins = student_scores[:, :1] - student_scores[:, 1:]
+            margin_loss = F.mse_loss(student_margins.float(), teacher_margins.float())
+            train_loss = margin_loss
+            if query_anchor_coeff > 0.0:
+                anchor_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+                train_loss = train_loss + query_anchor_coeff * anchor_loss
+            else:
+                anchor_loss = q_vecs.new_tensor(0.0)
+
+            if lambda_q > 0.0:
+                lq_scale = min(1.0, step / lambda_q_warmup_steps) if lambda_q_warmup_steps > 0 else 1.0
+                train_loss = train_loss + lq_scale * lambda_q * q_vecs.sum(-1).mean()
+
+        is_accum_boundary = (step + 1) % grad_accum == 0 or (step + 1) == alignment_steps
+        scaler.scale(train_loss / grad_accum).backward()
+        if is_accum_boundary:
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in query_model.parameters() if p.requires_grad], 1.0
+            )
+            scaler.step(optimizer); scaler.update(); scheduler.step()
+            optimizer.zero_grad()
+
+        if do_log:
+            elapsed = time.time() - t0
+            lr = optimizer.param_groups[0]["lr"]
+            phase = "warm" if step < freeze_warmup_steps else "full"
+            with torch.no_grad():
+                q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+                flops = q_vecs.detach().abs().sum(-1).mean().item()
+                s_rank1 = student_scores.detach().argmax(-1).eq(0).float().mean().item()
+                t_rank1 = teacher_scores.argmax(-1).eq(0).float().mean().item()
+                margin_mae = (student_margins.float() - teacher_margins.float()).abs().mean().item()
+                teacher_margin_abs = teacher_margins.float().abs().mean().item()
+                student_margin_abs = student_margins.float().abs().mean().item()
+            print(
+                f"[shallow-distill/{phase}] step {step+1:>6} | loss {train_loss.item():.4f} "
+                f"(margin {margin_loss.item():.3f} anchor {anchor_loss.item():.3f} "
+                f"mae {margin_mae:.3f} | |m| s={student_margin_abs:.2f} t={teacher_margin_abs:.2f}) | "
+                f"q_nnz {q_nnz:.1f} | flops {flops:.1f} | "
+                f"p@1 s={s_rank1:.2f} t={t_rank1:.2f} | lr {lr:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar(f"splade_shallow_align_distill/{phase}/loss", train_loss.item(), step + 1)
+            writer.add_scalar(f"splade_shallow_align_distill/{phase}/margin_loss", margin_loss.item(), step + 1)
+            writer.add_scalar(f"splade_shallow_align_distill/{phase}/anchor_loss", anchor_loss.item(), step + 1)
+            writer.add_scalar("splade_shallow_align_distill/margin_mae", margin_mae, step + 1)
+            writer.add_scalar("splade_shallow_align_distill/student_margin_abs", student_margin_abs, step + 1)
+            writer.add_scalar("splade_shallow_align_distill/teacher_margin_abs", teacher_margin_abs, step + 1)
+            writer.add_scalar("splade_shallow_align_distill/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("splade_shallow_align_distill/precision_at_1", s_rank1, step + 1)
+            writer.add_scalar("splade_shallow_align_distill/teacher_precision_at_1", t_rank1, step + 1)
+            writer.add_scalar("splade_shallow_align_distill/lr", lr, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % sc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if cfg.get("eval", {}).get("datasets"):
+                print(f"[shallow-distill] Eval at step {step+1} …")
+                import gc; gc.collect(); torch.cuda.empty_cache()
+                query_model.eval()
+                evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="splade_shallow_align_distill",
+                )
+                query_model.train()
+                gc.collect(); torch.cuda.empty_cache()
+
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
+    print(f"[shallow-distill] Done. Final checkpoint → {final_path}")
     writer.close()
 
 
@@ -2990,7 +3380,9 @@ def main():
             "sae", "splade", "asymmetric", "projected",
             "vocab_transplant", "vocab_transplant_align", "lion_transplant_align",
             "random_init_align", "doc_head_align", "direct_align",
-            "splade_shallow_align", "lion_shallow_align",
+            "splade_shallow_align", "splade_shallow_factorized_align",
+            "splade_shallow_factorized_spaced_align",
+            "splade_shallow_align_distill", "lion_shallow_align",
         ],
         help="Training stage to run.",
     )
@@ -3023,6 +3415,12 @@ def main():
         train_direct_align(cfg, resume=args.resume)
     elif args.stage == "splade_shallow_align":
         train_splade_shallow_align(cfg, resume=args.resume, init_from=args.init_from)
+    elif args.stage == "splade_shallow_factorized_align":
+        train_splade_shallow_factorized_align(cfg, resume=args.resume, init_from=args.init_from)
+    elif args.stage == "splade_shallow_factorized_spaced_align":
+        train_splade_shallow_factorized_spaced_align(cfg, resume=args.resume, init_from=args.init_from)
+    elif args.stage == "splade_shallow_align_distill":
+        train_splade_shallow_align_distill(cfg, resume=args.resume, init_from=args.init_from)
     elif args.stage == "lion_shallow_align":
         train_lion_shallow_align(cfg, resume=args.resume)
     else:
