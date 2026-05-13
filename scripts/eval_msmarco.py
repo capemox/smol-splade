@@ -355,14 +355,34 @@ def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
             hf_id,
             sc["n_layers"],
             factorized_embedding_dim=sc.get("factorized_embedding_dim", 128),
-            init=sc.get("factorization_init", "svd"),
+            init="random",
             layer_indices=sc.get("layer_indices"),
         )
     elif stage == "lion_shallow_align":
         from model import ShallowLionQuery
         hf_id = sc["lion_hf_id"]
         print(f"Loading ShallowLionQuery ({sc['n_layers']} layers) from {checkpoint} ...")
-        model = ShallowLionQuery(hf_id, sc["n_layers"])
+        model = ShallowLionQuery(
+            hf_id,
+            sc["n_layers"],
+            layer_indices=sc.get("layer_indices"),
+        )
+    elif stage in ("lion_shallow_factorized_align", "lion_shallow_factorized_spaced_align"):
+        from model import ShallowFactorizedLionQuery
+        hf_id = sc["lion_hf_id"]
+        print(
+            f"Loading ShallowFactorizedLionQuery ({sc['n_layers']} layers, "
+            f"factor_dim={sc.get('factorized_embedding_dim', 128)}, "
+            f"layers={sc.get('layer_indices', list(range(sc['n_layers'])))}"
+            f") from {checkpoint} ..."
+        )
+        model = ShallowFactorizedLionQuery(
+            hf_id,
+            sc["n_layers"],
+            factorized_embedding_dim=sc.get("factorized_embedding_dim", 128),
+            init="random",
+            layer_indices=sc.get("layer_indices"),
+        )
     else:
         raise ValueError(f"Unsupported shallow stage: {stage}")
     ckpt = torch.load(checkpoint, map_location="cpu")
@@ -387,6 +407,8 @@ def main():
             "splade_shallow_factorized_align",
             "splade_shallow_factorized_spaced_align",
             "lion_shallow_align",
+            "lion_shallow_factorized_align",
+            "lion_shallow_factorized_spaced_align",
         ],
         help="Model type to evaluate (selects config section and model class)",
     )
@@ -439,6 +461,8 @@ def main():
         "splade_shallow_factorized_align",
         "splade_shallow_factorized_spaced_align",
         "lion_shallow_align",
+        "lion_shallow_factorized_align",
+        "lion_shallow_factorized_spaced_align",
     ):
         sc = cfg[args.stage]
         query_max_length = sc["query_max_length"]
@@ -460,10 +484,17 @@ def main():
             doc_hf_id = sc["lion_hf_id"]
             print(f"Loading frozen Lion doc encoder: {doc_hf_id} ...")
             doc_splade = FrozenLionSPLADE(doc_hf_id)
-            # No index exists for Lion's 128K vocab — force subset mode
-            has_index = False
-            if args.max_corpus_size == 0:
-                print("  [lion] No pre-built index for Lion (128K vocab). Defaulting to 200k subset.")
+            # Lion needs a separate 128K-vocab index. If none is present, fall
+            # back to subset mode rather than accidentally using the SPLADE-v3
+            # 30K-vocab index.
+            has_index = args.max_corpus_size == 0
+            if has_index and not (Path(args.index_dir) / "manifest.json").exists():
+                print(
+                    "  [lion] No pre-built Lion index found. Defaulting to 200k subset. "
+                    "Build one with scripts/build_msmarco_index.py --stage "
+                    f"{args.stage} --index_dir {args.index_dir}"
+                )
+                has_index = False
                 args.max_corpus_size = 200_000
 
         doc_splade.to(device).eval()

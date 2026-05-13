@@ -1328,7 +1328,7 @@ def test_splade_shallow_factorized_spaced_align_config():
     assert sc["doc_splade_hf_id"] == "naver/splade-v3"
     assert sc["n_layers"] == 3
     assert sc["layer_indices"] == [0, 6, 11], "should use first, seventh, and last doc layers"
-    assert sc["factorized_embedding_dim"] == 128
+    assert sc["factorized_embedding_dim"] == 256
     assert sc["factorization_init"] == "svd"
     assert sc["use_contrastive"] is False
     assert sc["log_ranking_metrics"] is False
@@ -1338,6 +1338,156 @@ def test_splade_shallow_factorized_spaced_align_config():
         "  [PASS] splade_shallow_factorized_spaced_align config — "
         f"layers={sc['layer_indices']}, frozen_head={sc['freeze_head_after_warmup']}"
     )
+
+
+def test_lion_shallow_factorized_spaced_align_config():
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+    assert "lion_shallow_factorized_spaced_align" in cfg, "Lion spaced factorized config missing"
+    sc = cfg["lion_shallow_factorized_spaced_align"]
+
+    assert sc["lion_hf_id"] == "hzeng/Lion-SP-1B-llama3-marco-mntp"
+    assert sc["n_layers"] == 3
+    assert sc["layer_indices"] == [0, 6, -1], "should use first, seventh, and last Lion-SP-1B layers"
+    assert sc["factorized_embedding_dim"] == 256
+    assert sc["factorization_init"] == "svd"
+    assert sc["freeze_head_after_warmup"] is False, "Lion factorized run should unfreeze lexical factors after warmup"
+    assert sc["batch_size"] == cfg["lion_shallow_align"]["batch_size"]
+    assert sc["gradient_accumulation_steps"] == cfg["lion_shallow_align"]["gradient_accumulation_steps"]
+    assert sc["output_dir"] == "lion_shallow_factorized_spaced_align"
+    print(
+        "  [PASS] lion_shallow_factorized_spaced_align config — "
+        f"layers={sc['layer_indices']}, frozen_head={sc['freeze_head_after_warmup']}"
+    )
+
+
+def test_lion_shallow_factorized_align_config():
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+    assert "lion_shallow_factorized_align" in cfg, "Lion contiguous factorized config missing"
+    sc = cfg["lion_shallow_factorized_align"]
+    spaced = cfg["lion_shallow_factorized_spaced_align"]
+
+    assert sc["lion_hf_id"] == spaced["lion_hf_id"]
+    assert sc["n_layers"] == 5
+    assert "layer_indices" not in sc, "contiguous Lion factorized run should use first n_layers"
+    for key in [
+        "factorized_embedding_dim",
+        "factorization_init",
+        "batch_size",
+        "gradient_accumulation_steps",
+        "eval_batch_size",
+        "freeze_warmup_steps",
+        "head_lr_scale",
+        "freeze_head_after_warmup",
+        "alignment_steps",
+        "alignment_lr",
+        "lambda_q",
+        "lambda_q_warmup_steps",
+    ]:
+        assert sc[key] == spaced[key], f"{key} should match spaced Lion factorized config"
+    assert sc["output_dir"] == "lion_shallow_factorized_align"
+    print(
+        "  [PASS] lion_shallow_factorized_align config — "
+        f"n_layers={sc['n_layers']}, lambda_q={sc['lambda_q']}"
+    )
+
+
+def test_lion_factorized_layer_indices_selection():
+    import json
+    import tempfile
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from model import ShallowFactorizedLionQuery
+    import huggingface_hub
+    import peft
+    import transformers
+
+    VOCAB = 64
+    H = 16
+    R = 4
+
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 0
+        padding_side = "right"
+
+    class FakeLlamaInner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList(
+                [torch.nn.Linear(H, H, bias=False) for _ in range(16)]
+            )
+            self.embed_tokens = torch.nn.Embedding(VOCAB, H, padding_idx=0)
+            self.norm = torch.nn.LayerNorm(H)
+
+    class FakeLlamaForCausalLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = FakeLlamaInner()
+            self.lm_head = torch.nn.Linear(H, VOCAB, bias=False)
+            self.config = SimpleNamespace(
+                hidden_size=H,
+                vocab_size=VOCAB,
+                num_hidden_layers=16,
+                is_causal=True,
+                initializer_range=0.02,
+                tie_word_embeddings=False,
+            )
+
+        def forward(self, input_ids, attention_mask=None, use_cache=False):
+            h = self.model.embed_tokens(input_ids)
+            for layer in self.model.layers:
+                h = torch.tanh(layer(h))
+            h = self.model.norm(h)
+            return SimpleNamespace(logits=self.lm_head(h))
+
+    class FakePeftModel:
+        def __init__(self, base):
+            self.base = base
+
+        def merge_and_unload(self):
+            return self.base
+
+    fake_lm = FakeLlamaForCausalLM()
+    original_layers = list(fake_lm.model.layers)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        adapter_path = Path(tmp) / "adapter_config.json"
+        adapter_path.write_text(json.dumps({"base_model_name_or_path": "fake/lion-base"}))
+        with patch.object(huggingface_hub, "hf_hub_download", return_value=str(adapter_path)), \
+             patch.object(transformers.LlamaForCausalLM, "from_pretrained", return_value=fake_lm), \
+             patch.object(transformers.AutoTokenizer, "from_pretrained", return_value=FakeTokenizer()), \
+             patch.object(peft.LoraConfig, "from_pretrained", return_value=object()), \
+             patch.object(peft.PeftModel, "from_pretrained", side_effect=lambda base, *a, **k: FakePeftModel(base)):
+            model = ShallowFactorizedLionQuery(
+                "fake/lion",
+                n_layers=3,
+                factorized_embedding_dim=R,
+                init="svd",
+                layer_indices=[0, 6, -1],
+            )
+
+    assert model.layer_indices == [0, 6, 15]
+    assert model.n_layers == 3
+    assert model.original_n_layers == 16
+    assert list(model.model.model.layers) == [
+        original_layers[0],
+        original_layers[6],
+        original_layers[15],
+    ], "selected Lion layers should be first, seventh, and last"
+    assert isinstance(model.model.model.embed_tokens, FactorizedWordEmbeddings)
+    assert isinstance(model.model.lm_head, FactorizedBertDecoder)
+    assert model.factorized_param_count() == VOCAB * R + R * H
+
+    ids = torch.tensor([[1, 2, 3]])
+    mask = torch.ones_like(ids)
+    vec = model.encode(ids, mask)
+    assert vec.shape == (1, VOCAB), f"factorized Lion encode shape mismatch: {vec.shape}"
+    print("  [PASS] ShallowFactorizedLionQuery — selected [0, 6, 15] and factorized lexical head")
 
 
 def test_splade_shallow_factorized_align_training_smoke():
@@ -1570,6 +1720,9 @@ TESTS = [
     ("ShallowSpladeQuery layer_indices", test_shallow_layer_indices_selection),
     ("splade_shallow_factorized_align config", test_splade_shallow_factorized_align_config),
     ("splade_shallow_factorized_spaced_align config", test_splade_shallow_factorized_spaced_align_config),
+    ("lion_shallow_factorized_align config", test_lion_shallow_factorized_align_config),
+    ("lion_shallow_factorized_spaced_align config", test_lion_shallow_factorized_spaced_align_config),
+    ("ShallowFactorizedLionQuery layer_indices", test_lion_factorized_layer_indices_selection),
     ("splade_shallow_factorized_align training smoke", test_splade_shallow_factorized_align_training_smoke),
 ]
 

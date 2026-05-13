@@ -580,8 +580,8 @@ splade_shallow_factorized_spaced_align:
   doc_splade_hf_id: "naver/splade-v3"
   n_layers: 3
   layer_indices: [0, 6, 11]       # first, 7th, and last layer from BERT-base SPLADE-v3
-  factorized_embedding_dim: 128
-  factorization_init: "svd"
+  factorized_embedding_dim: 256
+  factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
 
   queries_dataset: "Tevatron/msmarco-passage"
   doc_max_length: 128
@@ -698,6 +698,82 @@ lion_shallow_align:
   log_every: 200
   save_every: 10_000
   output_dir: "lion_shallow_align"
+
+
+# ── Stage: Factorized shallow Lion with first 3 layers ───────────────────────
+# Same hyperparameters as lion_shallow_factorized_spaced_align, but keeps the
+# first 3 Lion layers contiguously instead of selecting [0, 6, -1].
+#
+# Run: uv run train.py lion_shallow_factorized_align --config config.yaml
+lion_shallow_factorized_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 5
+  factorized_embedding_dim: 256
+  factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8   # effective batch = 32; matches lion_shallow_align
+  eval_batch_size: 4               # frozen full Lion doc encoder is still the memory bottleneck
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01
+  freeze_head_after_warmup: false  # unfreeze factorized embed_tokens/lm_head after warmup
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001                 # keep strong pressure; exact-SVD factorized Lion ran dense at 0.0002
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_align"
+
+
+# ── Stage: Factorized shallow Lion with spaced doc layers ────────────────────
+# Lion analog of splade_shallow_factorized_spaced_align.
+# Query encoder = Lion layers [0, 6, -1] with an ALBERT-style tied
+# factorized embed_tokens / lm_head lexical matrix. The factorized lexical
+# factors/head unfreeze after warmup at a low LR, so this isolates whether
+# training the compressed Lion lexical basis helps.
+#
+# Run: uv run train.py lion_shallow_factorized_spaced_align --config config.yaml
+lion_shallow_factorized_spaced_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 3
+  layer_indices: [0, 6, -1]       # first, 7th, and last layer from Lion-SP-1B
+  factorized_embedding_dim: 256
+  factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8   # effective batch = 32; matches lion_shallow_align
+  eval_batch_size: 4               # frozen full Lion doc encoder is still the memory bottleneck
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01
+  freeze_head_after_warmup: false  # unfreeze factorized embed_tokens/lm_head after warmup
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001                 # keep strong pressure; exact-SVD factorized Lion ran dense at 0.0002
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_spaced_align"
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────

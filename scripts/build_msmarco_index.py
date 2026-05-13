@@ -121,6 +121,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
+        "--stage",
+        default="vocab_transplant",
+        choices=[
+            "vocab_transplant",
+            "splade_shallow_align",
+            "splade_shallow_factorized_align",
+            "splade_shallow_factorized_spaced_align",
+            "lion_shallow_align",
+            "lion_shallow_factorized_align",
+            "lion_shallow_factorized_spaced_align",
+        ],
+        help="Config section whose frozen document encoder should build the index",
+    )
+    parser.add_argument(
         "--index_dir", default="data/msmarco_index",
         help="Directory to write CSR shards into",
     )
@@ -151,19 +165,27 @@ def main():
     import yaml
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-    vc = cfg["vocab_transplant"]
+    sc = cfg[args.stage]
     corpus_dataset = cfg["sae"]["corpus_dataset"]
     text_field = cfg["sae"].get("corpus_text_field", "text")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    from model import FrozenDocSPLADE
-    print(f"Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} ...")
-    doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
+    if args.stage.startswith("lion_"):
+        from model import FrozenLionSPLADE
+        doc_hf_id = sc["lion_hf_id"]
+        print(f"Loading frozen Lion SPLADE: {doc_hf_id} ...")
+        doc_splade = FrozenLionSPLADE(doc_hf_id)
+    else:
+        from model import FrozenDocSPLADE
+        doc_hf_id = sc.get("doc_splade_hf_id") or cfg["vocab_transplant"]["doc_splade_hf_id"]
+        print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
+        doc_splade = FrozenDocSPLADE(doc_hf_id)
     doc_splade.to(device)
     doc_splade.eval()
     vocab_size = doc_splade.vocab_size
+    doc_max_length = int(sc.get("doc_max_length", cfg["vocab_transplant"]["doc_max_length"]))
 
     index_dir = Path(args.index_dir)
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -173,8 +195,8 @@ def main():
     manifest_path = index_dir / "manifest.json"
     target_total = args.limit if args.limit > 0 else CORPUS_SIZE
     manifest = {
-        "doc_splade_hf_id": vc["doc_splade_hf_id"],
-        "doc_max_length": int(vc["doc_max_length"]),
+        "doc_splade_hf_id": doc_hf_id,
+        "doc_max_length": doc_max_length,
         "vocab_size": int(vocab_size),
         "shard_size": int(args.shard_size),
         "corpus_dataset": corpus_dataset,
@@ -253,7 +275,7 @@ def main():
         if not buf_texts:
             return
         with torch.no_grad(), autocast_ctx:
-            vecs = doc_splade.encode(buf_texts, vc["doc_max_length"], no_grad=True)
+            vecs = doc_splade.encode(buf_texts, doc_max_length, no_grad=True)
         # bf16/fp16 → fp32 on CPU for sparsification; values re-cast to fp16 on save.
         vecs = vecs.float().cpu()
         for j, did in enumerate(buf_docids):

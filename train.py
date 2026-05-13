@@ -3146,7 +3146,12 @@ def train_splade_shallow_align_distill(cfg: dict, resume: str | None = None, ini
     writer.close()
 
 
-def train_lion_shallow_align(cfg: dict, resume: str | None = None):
+def train_lion_shallow_align(
+    cfg: dict,
+    resume: str | None = None,
+    section: str = "lion_shallow_align",
+    factorized: bool = False,
+):
     """3-layer (or N-layer) Lion-SP-1B query encoder distilled against the full Lion doc encoder.
 
     Same recipe as train_splade_shallow_align but for Lion-SP-1B (Llama-3 decoder-only):
@@ -3154,20 +3159,20 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
       - Phase 1: everything trains; head+embeddings at head_lr_scale * body_lr.
       - Loss: direct MSE on SPLADE vectors + L1 sparsity (lambda_q), STE through relu.
 
-    Reads from the ``lion_shallow_align`` config section.
+    Reads from the ``lion_shallow_align`` config section by default.
     """
     import gc
     from torch.cuda.amp import GradScaler, autocast
     from torch.utils.tensorboard import SummaryWriter
     import torch.nn.functional as F
 
-    from model import FrozenLionSPLADE, ShallowLionQuery
+    from model import FrozenLionSPLADE, ShallowFactorizedLionQuery, ShallowLionQuery
     from eval import evaluate_asymmetric
     from data import make_ranking_distill_loader
 
-    if "lion_shallow_align" not in cfg:
-        raise SystemExit("[lion-shallow] config.yaml is missing a `lion_shallow_align:` section.")
-    sc = cfg["lion_shallow_align"]
+    if section not in cfg:
+        raise SystemExit(f"[lion-shallow] config.yaml is missing a `{section}:` section.")
+    sc = cfg[section]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -3182,19 +3187,44 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
     lambda_q_warmup_steps = int(sc.get("lambda_q_warmup_steps", 0))
     nway                  = int(sc.get("nway", 8))
     grad_accum          = int(sc.get("gradient_accumulation_steps", 1))
+    freeze_head_after_warmup = bool(sc.get("freeze_head_after_warmup", True))
 
     print(
         f"[lion-shallow] lion={sc['lion_hf_id']} | n_layers={n_layers} "
         f"| freeze_warmup={freeze_warmup_steps} | alignment={alignment_steps} "
         f"| lr={align_lr} | head_lr_scale={head_lr_scale} "
-        f"| nway={nway} | lambda_q={lambda_q} | grad_accum={grad_accum}"
+        f"| nway={nway} | lambda_q={lambda_q} | grad_accum={grad_accum} "
+        f"| freeze_head_after_warmup={freeze_head_after_warmup}"
     )
 
     print(f"[lion-shallow] Loading frozen Lion doc encoder …")
     lion_doc = FrozenLionSPLADE(sc["lion_hf_id"]); lion_doc.to(device); lion_doc.eval()
 
     print(f"[lion-shallow] Building {n_layers}-layer shallow Lion query encoder …")
-    query_model = ShallowLionQuery(sc["lion_hf_id"], n_layers=n_layers)
+    layer_indices = sc.get("layer_indices")
+    if layer_indices is not None:
+        layer_indices = [int(idx) for idx in layer_indices]
+        print(f"[lion-shallow] Using explicit Lion layer indices for query body: {layer_indices}")
+    if factorized:
+        factor_dim = int(sc.get("factorized_embedding_dim", 128))
+        factor_init = sc.get("factorization_init", "svd")
+        query_kwargs = {
+            "n_layers": n_layers,
+            "factorized_embedding_dim": factor_dim,
+            "init": factor_init,
+        }
+        if layer_indices is not None:
+            query_kwargs["layer_indices"] = layer_indices
+        query_model = ShallowFactorizedLionQuery(sc["lion_hf_id"], **query_kwargs)
+        print(
+            f"[lion-shallow] Installed factorized Lion lexical matrix: dim={factor_dim} "
+            f"init={factor_init} factorized_params={query_model.factorized_param_count()/1e6:.1f}M"
+        )
+    else:
+        query_kwargs = {"n_layers": n_layers}
+        if layer_indices is not None:
+            query_kwargs["layer_indices"] = layer_indices
+        query_model = ShallowLionQuery(sc["lion_hf_id"], **query_kwargs)
     query_model.to(device)
     query_tokenizer = query_model.tokenizer
     n_total = sum(p.numel() for p in query_model.parameters())
@@ -3217,6 +3247,14 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
             f"[lion-shallow] Phase 0 (frozen warmup). Trainable: "
             f"{query_model.trainable_param_count()/1e6:.1f}M / {n_total/1e6:.1f}M"
         )
+    elif freeze_head_after_warmup:
+        query_model.freeze_for_warmup()
+        for p in query_model.model.model.norm.parameters():
+            p.requires_grad_(True)
+        print(
+            f"[lion-shallow] Resuming into Phase 1 with lexical factors/head frozen. "
+            f"Trainable: {query_model.trainable_param_count()/1e6:.1f}M / {n_total/1e6:.1f}M"
+        )
     else:
         query_model.unfreeze_all()
         print(f"[lion-shallow] Resuming directly into Phase 1.")
@@ -3236,7 +3274,7 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
     scaler = GradScaler(enabled=False)
     use_bf16 = fp16 and device.type == "cuda"
 
-    out_dir = Path("checkpoints_lion_shallow") / sc.get("output_dir", "lion_shallow_align")
+    out_dir = Path("checkpoints_lion_shallow") / sc.get("output_dir", section)
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
 
@@ -3248,7 +3286,7 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
     evaluate_asymmetric(
         query_model, query_tokenizer, lion_doc, cfg, device,
         writer=writer, step=0, run_doc_doc=True, override_k=0,
-        section="lion_shallow_align",
+        section=section,
     )
     gc.collect(); torch.cuda.empty_cache()
 
@@ -3260,22 +3298,38 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
     for step in range(start_step, alignment_steps):
         # ── Phase boundary ────────────────────────────────────────────
         if in_warmup and step >= freeze_warmup_steps:
-            # embed_tokens and lm_head are tied (262M shared params). Unfreezing
-            # them adds ~1GB of AdamW states which OOMs on 8GB GPUs. Only add the
-            # final layer norm — it's tiny and lets the body-to-head interface adapt.
-            for p in query_model.model.model.norm.parameters():
-                p.requires_grad_(True)
+            # embed_tokens and lm_head dominate Lion's query params. Keeping them
+            # frozen avoids a large AdamW-state jump on 8GB GPUs. The final norm
+            # is tiny and lets the body-to-head interface adapt.
             current_lr = optimizer.param_groups[0]["lr"]
-            optimizer = torch.optim.AdamW(
-                [p for p in query_model.parameters() if p.requires_grad],
-                lr=current_lr, weight_decay=weight_decay,
-            )
+            if freeze_head_after_warmup:
+                for p in query_model.model.model.norm.parameters():
+                    p.requires_grad_(True)
+                optimizer = torch.optim.AdamW(
+                    [p for p in query_model.parameters() if p.requires_grad],
+                    lr=current_lr, weight_decay=weight_decay,
+                )
+                phase_msg = "body + norm; lexical factors/head frozen"
+            else:
+                query_model.unfreeze_all()
+                body_params = list(query_model.model.model.layers.parameters())
+                body_params.extend(list(query_model.model.model.norm.parameters()))
+                body_ids = {id(p) for p in body_params}
+                head_params = [p for p in query_model.parameters() if id(p) not in body_ids]
+                optimizer = torch.optim.AdamW([
+                    {"params": body_params, "lr": current_lr},
+                    {"params": head_params, "lr": current_lr * head_lr_scale},
+                ], weight_decay=weight_decay)
+                phase_msg = (
+                    f"body_lr={current_lr:.2e} "
+                    f"head_lr={current_lr * head_lr_scale:.2e}"
+                )
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=alignment_steps - freeze_warmup_steps, eta_min=1e-5,
             )
             optimizer.zero_grad()
             in_warmup = False
-            print(f"[lion-shallow] Step {step}: switched to Phase 1 (body + norm). lr={current_lr:.2e}")
+            print(f"[lion-shallow] Step {step}: switched to Phase 1 ({phase_msg}).")
 
         do_log = (step + 1) % sc["log_every"] == 0
         q_texts, p_texts = next(ranking_loader)
@@ -3347,11 +3401,11 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
                 f"| flops {flops:.1f} | p@1 s={s_rank1:.2f} t={t_rank1:.2f} "
                 f"| lr {lr:.2e} | {elapsed:.0f}s"
             )
-            writer.add_scalar("lion_shallow_align/loss", align_loss.item(), step + 1)
-            writer.add_scalar("lion_shallow_align/rank_loss", rank_loss.item(), step + 1)
-            writer.add_scalar("lion_shallow_align/q_nnz", q_nnz, step + 1)
-            writer.add_scalar("lion_shallow_align/teacher_nnz", t_nnz, step + 1)
-            writer.add_scalar("lion_shallow_align/lr", lr, step + 1)
+            writer.add_scalar(f"{section}/loss", align_loss.item(), step + 1)
+            writer.add_scalar(f"{section}/rank_loss", rank_loss.item(), step + 1)
+            writer.add_scalar(f"{section}/q_nnz", q_nnz, step + 1)
+            writer.add_scalar(f"{section}/teacher_nnz", t_nnz, step + 1)
+            writer.add_scalar(f"{section}/lr", lr, step + 1)
 
         if (step + 1) % sc["save_every"] == 0:
             ckpt_path = out_dir / f"align_step_{step+1}.pt"
@@ -3361,7 +3415,7 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
             evaluate_asymmetric(
                 query_model, query_tokenizer, lion_doc, cfg, device,
                 writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
-                section="lion_shallow_align",
+                section=section,
             )
             query_model.train()
             gc.collect(); torch.cuda.empty_cache()
@@ -3370,6 +3424,24 @@ def train_lion_shallow_align(cfg: dict, resume: str | None = None):
     torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
     print(f"[lion-shallow] Done. Final checkpoint → {final_path}")
     writer.close()
+
+
+def train_lion_shallow_factorized_spaced_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_spaced_align",
+        factorized=True,
+    )
+
+
+def train_lion_shallow_factorized_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_align",
+        factorized=True,
+    )
 
 
 def main():
@@ -3383,6 +3455,8 @@ def main():
             "splade_shallow_align", "splade_shallow_factorized_align",
             "splade_shallow_factorized_spaced_align",
             "splade_shallow_align_distill", "lion_shallow_align",
+            "lion_shallow_factorized_align",
+            "lion_shallow_factorized_spaced_align",
         ],
         help="Training stage to run.",
     )
@@ -3423,6 +3497,10 @@ def main():
         train_splade_shallow_align_distill(cfg, resume=args.resume, init_from=args.init_from)
     elif args.stage == "lion_shallow_align":
         train_lion_shallow_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_align":
+        train_lion_shallow_factorized_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_spaced_align":
+        train_lion_shallow_factorized_spaced_align(cfg, resume=args.resume)
     else:
         train_vocab_transplant(cfg, resume=args.resume)
 

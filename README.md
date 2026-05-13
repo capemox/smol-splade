@@ -30,6 +30,11 @@ The most stable contributor path is now:
   teacher-vector MSE plus contrastive CE setup.
 - `lion_shallow_align`: the same truncation recipe for
   `hzeng/Lion-SP-1B-llama3-marco-mntp`.
+- `lion_shallow_factorized_spaced_align`: Lion analog of the factorized spaced
+  SPLADE recipe, using Lion layers 1, 7, and the final layer. This experiment
+  unfreezes the factorized lexical factors/head after warmup at a low LR.
+- `lion_shallow_factorized_align`: same factorized Lion setup, but using the
+  first 3 Lion layers contiguously.
 
 These avoid the brittle cross-vocabulary transplant problem. The query side is
 literally a shallow copy of the document model, so query and document vectors
@@ -88,6 +93,18 @@ Run the Lion shallow-query recipe:
 
 ```bash
 uv run train.py lion_shallow_align --config config.yaml
+```
+
+Run the Lion factorized spaced-layer variant:
+
+```bash
+uv run train.py lion_shallow_factorized_spaced_align --config config.yaml
+```
+
+Run the Lion factorized first-3-layer variant:
+
+```bash
+uv run train.py lion_shallow_factorized_align --config config.yaml
 ```
 
 Run the cross-encoder MarginMSE distillation variant:
@@ -149,6 +166,8 @@ The CLI stages in `train.py` are:
 | `splade_shallow_factorized_spaced_align` | Factorized shallow query using doc layers 1, 7, and 12. |
 | `splade_shallow_align_distill` | Shallow SPLADE query encoder trained with cross-encoder MarginMSE distillation. |
 | `lion_shallow_align` | Stable shallow query encoder for Lion-SP-1B. |
+| `lion_shallow_factorized_align` | Factorized shallow Lion query using the first 3 layers. |
+| `lion_shallow_factorized_spaced_align` | Factorized shallow Lion query using layers 1, 7, and the final layer. |
 
 Checkpoints are written under `checkpoints_<model-name>/<stage>/`.
 
@@ -233,6 +252,25 @@ Important config keys:
 | `lion_shallow_align.gradient_accumulation_steps` | `8` | Effective batch size 32. |
 | `lion_shallow_align.eval_batch_size` | `4` | Keep low to avoid eval OOM. |
 | `lion_shallow_align.lambda_q` | `0.001` | Query sparsity pressure. |
+
+### `lion_shallow_factorized_spaced_align`
+
+This is the Lion-SP-1B analog of `splade_shallow_factorized_spaced_align`. The
+query body uses Lion layers `[0, 6, -1]`, and the large Llama
+`embed_tokens`/`lm_head` lexical matrix is replaced with shared ALBERT-style
+factors. The default initializer is exact SVD (`svd`) over Lion's full lexical
+matrix, matching the SPLADE-v3 factorized setup more closely than randomized
+low-rank SVD.
+
+Only the retained body layers train during warmup. After warmup, the final norm
+and factorized lexical factors/head are also trainable, with the lexical factors
+using `head_lr_scale: 0.01`.
+
+### `lion_shallow_factorized_align`
+
+This uses the same factorized Lion hyperparameters as
+`lion_shallow_factorized_spaced_align`, but keeps the first 3 Lion layers
+contiguously instead of selecting `[0, 6, -1]`.
 
 ## Experiment History
 

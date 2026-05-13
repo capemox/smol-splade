@@ -544,6 +544,25 @@ def _factorize_embedding_matrix(weight: torch.Tensor, factor_dim: int) -> tuple[
     return A.contiguous(), B.contiguous()
 
 
+def _factorize_embedding_matrix_lowrank(
+    weight: torch.Tensor,
+    factor_dim: int,
+    oversample: int = 16,
+    niter: int = 2,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Memory-friendlier randomized low-rank SVD for very large lexical matrices."""
+    full = weight.detach().float().cpu()
+    vocab_size, hidden_size = full.shape
+    if factor_dim <= 0 or factor_dim > min(vocab_size, hidden_size):
+        raise ValueError(f"factor_dim={factor_dim} must be in [1, {min(vocab_size, hidden_size)}]")
+    q = min(min(vocab_size, hidden_size), factor_dim + oversample)
+    U, S, V = torch.svd_lowrank(full, q=q, niter=niter)
+    sqrt_s = S[:factor_dim].sqrt()
+    A = U[:, :factor_dim] * sqrt_s.unsqueeze(0)
+    B = sqrt_s.unsqueeze(1) * V[:, :factor_dim].T
+    return A.contiguous(), B.contiguous()
+
+
 class ShallowFactorizedSpladeQuery(ShallowSpladeQuery):
     """Shallow SPLADE query with ALBERT-style factorized embedding/head matrix.
 
@@ -699,7 +718,7 @@ class ShallowLionQuery(nn.Module):
         log1p(relu(max_pool(logits * hidden_size^-0.25)))
     """
 
-    def __init__(self, hf_id: str, n_layers: int):
+    def __init__(self, hf_id: str, n_layers: int, layer_indices: Optional[List[int]] = None):
         super().__init__()
         import json
         from huggingface_hub import hf_hub_download
@@ -735,7 +754,26 @@ class ShallowLionQuery(nn.Module):
         original_n = len(self.model.model.layers)
         if n_layers <= 0 or n_layers > original_n:
             raise ValueError(f"n_layers={n_layers} must be in [1, {original_n}]")
-        self.model.model.layers = nn.ModuleList(list(self.model.model.layers)[:n_layers])
+        if layer_indices is not None:
+            if len(layer_indices) != n_layers:
+                raise ValueError(
+                    f"layer_indices length ({len(layer_indices)}) must match n_layers={n_layers}"
+                )
+            resolved_layer_indices = [
+                idx if idx >= 0 else original_n + idx
+                for idx in layer_indices
+            ]
+            if any(idx < 0 or idx >= original_n for idx in resolved_layer_indices):
+                raise ValueError(
+                    f"layer_indices={layer_indices} must resolve to [0, {original_n - 1}]"
+                )
+            selected_layers = [self.model.model.layers[idx] for idx in resolved_layer_indices]
+            self.layer_indices: List[int] = list(resolved_layer_indices)
+        else:
+            selected_layers = list(self.model.model.layers)[:n_layers]
+            self.layer_indices = list(range(n_layers))
+
+        self.model.model.layers = nn.ModuleList(selected_layers)
         self.model.config.num_hidden_layers = n_layers
         self.n_layers = n_layers
         self.original_n_layers = original_n
@@ -766,6 +804,74 @@ class ShallowLionQuery(nn.Module):
         mask = attention_mask.unsqueeze(-1).float()
         logits = logits + (1.0 - mask) * -1e6
         return torch.log1p(torch.relu(logits.max(dim=1).values))
+
+
+class ShallowFactorizedLionQuery(ShallowLionQuery):
+    """Shallow Lion query with ALBERT-style tied lexical factors.
+
+    Replaces the huge Llama input embedding / LM-head lexical matrix with shared
+    factors. The input path computes ``token_id -> A -> B`` and the output path
+    computes ``hidden -> B.T -> A.T``. This keeps the Lion vocabulary unchanged
+    while cutting the query-side lexical parameter floor.
+    """
+
+    def __init__(
+        self,
+        hf_id: str,
+        n_layers: int,
+        factorized_embedding_dim: int = 128,
+        init: str = "svd",
+        layer_indices: Optional[List[int]] = None,
+    ):
+        super().__init__(hf_id, n_layers, layer_indices=layer_indices)
+        self.factorized_embedding_dim = int(factorized_embedding_dim)
+        self._install_factorized_embeddings(init=init)
+
+    def _install_factorized_embeddings(self, init: str = "svd") -> None:
+        old_embed = self.model.model.embed_tokens
+        old_lm_head = self.model.lm_head
+        old_weight = old_lm_head.weight.detach()
+        if old_embed.weight.shape == old_lm_head.weight.shape:
+            # Prefer the output head: Lion retrieval quality depends directly on
+            # this lexical basis, and many Llama checkpoints do not strictly tie
+            # input/output weights in config even when shapes match.
+            init_weight = old_weight
+        else:
+            raise ValueError(
+                "Lion embed_tokens and lm_head shapes differ; cannot install tied factorization"
+            )
+
+        factorized = FactorizedWordEmbeddings(
+            old_embed.num_embeddings,
+            old_embed.embedding_dim,
+            self.factorized_embedding_dim,
+            padding_idx=old_embed.padding_idx,
+        ).to(device=old_embed.weight.device, dtype=old_embed.weight.dtype)
+
+        if init in {"svd", "svd_lowrank", "lowrank_svd", "randomized_svd"}:
+            if init == "svd":
+                A, B = _factorize_embedding_matrix(init_weight, self.factorized_embedding_dim)
+            else:
+                A, B = _factorize_embedding_matrix_lowrank(init_weight, self.factorized_embedding_dim)
+            factorized.lexical_embeddings.weight.data.copy_(A.to(init_weight.device, dtype=init_weight.dtype))
+            factorized.up_project.weight.data.copy_(B.T.to(init_weight.device, dtype=init_weight.dtype))
+        elif init == "random":
+            init_std = float(getattr(self.model.config, "initializer_range", 0.02))
+            nn.init.normal_(factorized.lexical_embeddings.weight, mean=0.0, std=init_std)
+            nn.init.normal_(factorized.up_project.weight, mean=0.0, std=init_std)
+        else:
+            raise ValueError(f"Unknown factorized embedding init: {init}")
+
+        self.model.model.embed_tokens = factorized
+        self.model.lm_head = FactorizedBertDecoder(factorized, bias=None).to(
+            device=old_lm_head.weight.device,
+            dtype=old_lm_head.weight.dtype,
+        )
+        self.model.config.tie_word_embeddings = True
+
+    def factorized_param_count(self) -> int:
+        emb = self.model.model.embed_tokens
+        return emb.lexical_embeddings.weight.numel() + emb.up_project.weight.numel()
 
 
 def splade_loss(
