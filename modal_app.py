@@ -39,7 +39,7 @@ import modal
 APP_NAME = "sae-smo-splade"
 VOLUME_NAME = "sae-smo-splade-vol"
 HF_SECRET_NAME = "huggingface-token"
-TELEGRAM_SECRET_NAME = "telegram-bot"
+TELEGRAM_SECRET_NAME = "alerts"
 
 # Paths inside the running container:
 REPO_SRC = "/repo"                                  # baked-in repo source (read-only)
