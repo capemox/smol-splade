@@ -838,6 +838,37 @@ lion_shallow_factorized_late_align:
   save_every: 10_000
   output_dir: "lion_shallow_factorized_late_align"
 
+  lion_shallow_factorized_late_h768_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 5
+  layer_indices: [0, 5, 10, 13, 15]    # same layers as late
+  factorized_embedding_dim: 768        # h=768 — matched to spaced5
+  factorization_init: "svd"
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01
+  freeze_head_after_warmup: false
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_late_h768_align"
+
 # ── Evaluation ────────────────────────────────────────────────────────────────
 eval:
   # NanoBEIR datasets to evaluate on (zeta-alpha-ai collection, ~50 queries each)
