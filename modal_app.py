@@ -15,13 +15,19 @@ ONE-TIME SETUP (from the repo root, after `pip install modal` and `modal setup`)
         TELEGRAM_CHAT_ID=987654321
     modal run modal_app.py::setup_workspace
 
-After that, the typical sequence is:
+USAGE — baseline (lion_shallow_factorized_align):
 
-    modal run --detach modal_app.py::gpu_smoke           # ~10 min sanity check
-    modal run --detach modal_app.py::index_smoke         # ~5 min pipeline smoke
-    modal run --detach modal_app.py::build_lion_index    # the big one (~8-12h)
-    modal run --detach modal_app.py::train_lion          # the research run
-    modal run --detach modal_app.py::eval_lion           # full MS MARCO dev
+    modal run --detach modal_app.py::train_lion
+    modal run --detach modal_app.py::eval_lion
+    modal run --detach modal_app.py::eval_lion_ceiling
+
+USAGE — any other stage (after adding it to config.yaml + train.py + eval_msmarco.py):
+
+    modal run --detach modal_app.py::train_stage --stage lion_shallow_factorized_spaced5_align
+    modal run --detach modal_app.py::eval_stage \\
+        --stage lion_shallow_factorized_spaced5_align \\
+        --checkpoint checkpoints_lion_shallow/lion_shallow_factorized_spaced5_align/align_final.pt
+    modal run --detach modal_app.py::eval_stage_ceiling --stage lion_shallow_factorized_spaced5_align
 
 Tail logs at any time (works from any machine):
 
@@ -39,43 +45,35 @@ import modal
 APP_NAME = "sae-smo-splade"
 VOLUME_NAME = "sae-smo-splade-vol"
 HF_SECRET_NAME = "huggingface-token"
-TELEGRAM_SECRET_NAME = "alerts"
+TELEGRAM_SECRET_NAME = "telegram-bot"
 
 # Paths inside the running container:
-REPO_SRC = "/repo"                                  # baked-in repo source (read-only)
-VOLUME_MOUNT = "/vol"                               # persistent volume root
-WORK_DIR = f"{VOLUME_MOUNT}/work/sae-smo-splade"    # writable repo copy on volume
-HF_CACHE = f"{VOLUME_MOUNT}/hf_cache"               # HF models + datasets cache
+REPO_SRC = "/repo"
+VOLUME_MOUNT = "/vol"
+WORK_DIR = f"{VOLUME_MOUNT}/work/sae-smo-splade"
+HF_CACHE = f"{VOLUME_MOUNT}/hf_cache"
 
-# GPU choice. L40S is the project instructions' recommendation for Lion.
 GPU_TYPE = "L40S"
 
 HOUR = 60 * 60
-TIMEOUT_LONG = 24 * HOUR    # Modal's hard ceiling per function call
+TIMEOUT_LONG = 24 * HOUR
 TIMEOUT_SHORT = 30 * 60
 
 # ── Modal app, image, volume, secrets ────────────────────────────────────────
 
 app = modal.App(APP_NAME)
 
-# V2 volume — handles the larger directories the Lion index produces (~50-100 GB).
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True, version=2)
 
 hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
 telegram_secret = modal.Secret.from_name(TELEGRAM_SECRET_NAME)
 
-# Image: Debian slim + uv + the repo source. The heavy CUDA-torch deps install
-# into the volume's venv on first `setup_workspace` call, not at image build,
-# so image rebuilds stay cheap.
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git", "rsync", "curl", "ca-certificates")
     .pip_install("uv")
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
-        # uv hardlinks between cache and venv when possible; on Modal those
-        # live on different filesystems so we explicitly copy to silence the
-        # warning we saw on the first setup_workspace run.
         "UV_LINK_MODE": "copy",
     })
     .add_local_dir(
@@ -90,7 +88,6 @@ image = (
     )
 )
 
-# Env every script invocation needs.
 RUNTIME_ENV = {
     "HF_HOME": HF_CACHE,
     "HF_HUB_CACHE": f"{HF_CACHE}/hub",
@@ -103,8 +100,6 @@ RUNTIME_ENV = {
 # ── Notifications ────────────────────────────────────────────────────────────
 
 def notify(message: str) -> None:
-    """Send a Telegram message. Silent no-op if creds aren't present so the
-    code stays usable even without the telegram-bot secret attached."""
     import os
     import urllib.parse
     import urllib.request
@@ -115,7 +110,6 @@ def notify(message: str) -> None:
         print(f"[notify skipped — no creds] {message[:200]}", flush=True)
         return
 
-    # Telegram caps each message at 4096 chars; leave headroom.
     payload = urllib.parse.urlencode({
         "chat_id": chat_id,
         "text": message[:4000],
@@ -129,12 +123,13 @@ def notify(message: str) -> None:
         urllib.request.urlopen(req, timeout=10).read()
         print("[notify ok]", flush=True)
     except Exception as exc:
-        # Never let a notification failure crash the actual job.
         print(f"[notify failed: {exc}]", flush=True)
 
 
-def with_notifications(job_name: str):
-    """Decorator: ping Telegram on start, success, and failure (with traceback)."""
+def with_notifications(job_label):
+    """Decorator: ping Telegram on start, success, and failure.
+    job_label can be a string or a callable(fn_args, fn_kwargs) -> string for
+    dynamic labels (e.g. including the stage name being trained)."""
     import functools
     import time
     import traceback
@@ -142,19 +137,19 @@ def with_notifications(job_name: str):
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            label = job_label(args, kwargs) if callable(job_label) else job_label
             t0 = time.time()
-            notify(f"🚀 {job_name} started on Modal ({APP_NAME})")
+            notify(f"🚀 {label} started on Modal ({APP_NAME})")
             try:
                 result = fn(*args, **kwargs)
                 mins = (time.time() - t0) / 60
-                notify(f"✅ {job_name} completed in {mins:.1f} min")
+                notify(f"✅ {label} completed in {mins:.1f} min")
                 return result
             except BaseException:
                 mins = (time.time() - t0) / 60
                 tb = traceback.format_exc()
-                # Keep the tail of the traceback — where the actual error is.
                 notify(
-                    f"❌ {job_name} failed after {mins:.1f} min\n\n"
+                    f"❌ {label} failed after {mins:.1f} min\n\n"
                     f"{tb[-2500:]}"
                 )
                 raise
@@ -162,8 +157,7 @@ def with_notifications(job_name: str):
     return decorator
 
 
-def _run(cmd: list[str]) -> None:
-    """Invoke `uv run <cmd>` inside the workspace directory."""
+def _run(cmd: list) -> None:
     import os
     import subprocess
     env = {**os.environ, **RUNTIME_ENV}
@@ -181,16 +175,13 @@ def _run(cmd: list[str]) -> None:
 )
 def setup_workspace():
     """Sync the image's baked-in repo source into the persistent volume, then
-    `uv sync` to install/refresh project dependencies inside the volume's venv.
-    Idempotent — safe to re-run after `git pull` or local edits."""
+    `uv sync` to refresh project dependencies. Idempotent."""
     import os
     import subprocess
 
     os.makedirs(WORK_DIR, exist_ok=True)
     os.makedirs(HF_CACHE, exist_ok=True)
 
-    # Copy repo source into the volume. --delete keeps it in sync but excludes
-    # paths that the volume itself owns (caches, checkpoints, data).
     subprocess.run([
         "rsync", "-a", "--delete",
         "--exclude=.git", "--exclude=.venv",
@@ -199,7 +190,6 @@ def setup_workspace():
         f"{REPO_SRC}/", f"{WORK_DIR}/",
     ], check=True)
 
-    # Build/refresh the venv inside the volume so subsequent runs reuse it.
     subprocess.run(["uv", "sync"], cwd=WORK_DIR, check=True)
 
     volume.commit()
@@ -214,9 +204,6 @@ def setup_workspace():
     timeout=60,
 )
 def notify_test():
-    """Verifies the telegram-bot secret is wired correctly. Run this once after
-    `modal secret create telegram-bot ...`. You should receive a Telegram
-    message within a few seconds of launching."""
     notify("🔔 Test ping from Modal — telegram-bot secret is wired up correctly.")
 
 
@@ -231,7 +218,6 @@ def notify_test():
 )
 @with_notifications("gpu_smoke")
 def gpu_smoke():
-    """End-to-end environment check: GPU visible, repo loads, models pull from HF."""
     import subprocess
     subprocess.run(["nvidia-smi"], check=True)
     _run(["smoke_test.py"])
@@ -249,7 +235,6 @@ def gpu_smoke():
 )
 @with_notifications("index_smoke")
 def index_smoke():
-    """Tiny end-to-end index build (200 docs) to validate the pipeline."""
     _run([
         "scripts/build_msmarco_index.py",
         "--stage", "lion_shallow_factorized_align",
@@ -262,7 +247,7 @@ def index_smoke():
     volume.commit()
 
 
-# ── Full Lion MS MARCO index build ───────────────────────────────────────────
+# ── Index build (one-time) ───────────────────────────────────────────────────
 
 @app.function(
     image=image,
@@ -274,9 +259,7 @@ def index_smoke():
 )
 @with_notifications("build_lion_index")
 def build_lion_index():
-    """Embed the full 8.84M-passage MS MARCO corpus with the frozen Lion-SP-1B
-    document encoder. Resumable: build_msmarco_index.py checkpoints by shard,
-    so retries (and re-invocations) continue from the last completed shard."""
+    """Embed full 8.84M-passage MS MARCO corpus with frozen Lion-SP-1B."""
     _run([
         "scripts/build_msmarco_index.py",
         "--stage", "lion_shallow_factorized_align",
@@ -288,7 +271,7 @@ def build_lion_index():
     volume.commit()
 
 
-# ── Training ─────────────────────────────────────────────────────────────────
+# ── Baseline (kept for backward compatibility) ───────────────────────────────
 
 @app.function(
     image=image,
@@ -300,39 +283,7 @@ def build_lion_index():
 )
 @with_notifications("train_lion")
 def train_lion():
-    """Train lion_shallow_factorized_align. Checkpoints land on the volume at
-    checkpoints_lion_shallow/lion_shallow_factorized_align/."""
-    _run([
-        "train.py", "lion_shallow_factorized_align",
-        "--config", "config.yaml",
-    ])
-    volume.commit()
-
-
-# ── Evaluation ───────────────────────────────────────────────────────────────
-@app.function(
-    image=image,
-    gpu=GPU_TYPE,
-    volumes={VOLUME_MOUNT: volume},
-    secrets=[hf_secret, telegram_secret],
-    timeout=6 * HOUR,
-)
-@with_notifications("eval_lion_ceiling")
-def eval_lion_ceiling():
-    """Apples-to-apples ceiling for eval_lion: encodes dev queries with the
-    frozen Lion-SP-1B teacher (no student, no checkpoint), then retrieves
-    against the same prebuilt Lion index. The --doc_only flag is built into
-    eval_msmarco.py for exactly this purpose."""
-    _run([
-        "scripts/eval_msmarco.py",
-        "--stage", "lion_shallow_factorized_align",
-        "--doc_only",
-        "--config", "config.yaml",
-        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
-        "--encode_batch_size", "8",
-        "--query_batch_size", "128",
-        "--densify_chunk", "1024",
-    ])
+    _run(["train.py", "lion_shallow_factorized_align", "--config", "config.yaml"])
     volume.commit()
 
 
@@ -347,8 +298,6 @@ def eval_lion_ceiling():
 def eval_lion(
     checkpoint: str = "checkpoints_lion_shallow/lion_shallow_factorized_align/align_final.pt",
 ):
-    """Full MS MARCO dev evaluation against the prebuilt Lion index. Pass a
-    different relative checkpoint path to score another checkpoint."""
     _run([
         "scripts/eval_msmarco.py",
         "--stage", "lion_shallow_factorized_align",
@@ -362,13 +311,101 @@ def eval_lion(
     volume.commit()
 
 
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=6 * HOUR,
+)
+@with_notifications("eval_lion_ceiling")
+def eval_lion_ceiling():
+    """Teacher-as-query ceiling for the baseline stage."""
+    _run([
+        "scripts/eval_msmarco.py",
+        "--stage", "lion_shallow_factorized_align",
+        "--doc_only",
+        "--config", "config.yaml",
+        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
+        "--encode_batch_size", "8",
+        "--query_batch_size", "128",
+        "--densify_chunk", "1024",
+    ])
+    volume.commit()
+
+
+# ── Parameterized stage runners (for experiments) ────────────────────────────
+
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_LONG,
+    retries=modal.Retries(max_retries=3, initial_delay=0.0),
+)
+@with_notifications(lambda a, kw: f"train_stage[{kw.get('stage', a[0] if a else '?')}]")
+def train_stage(stage: str = "lion_shallow_factorized_align"):
+    """Train any stage by name. Stage must be defined in config.yaml AND in
+    train.py's choices list + elif routing."""
+    _run(["train.py", stage, "--config", "config.yaml"])
+    volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=6 * HOUR,
+)
+@with_notifications(lambda a, kw: f"eval_stage[{kw.get('stage', a[0] if a else '?')}]")
+def eval_stage(stage: str, checkpoint: str):
+    """Eval any stage against the prebuilt Lion index. Lion-derived stages all
+    share the same index since they share the same teacher doc encoder."""
+    _run([
+        "scripts/eval_msmarco.py",
+        "--stage", stage,
+        "--checkpoint", checkpoint,
+        "--config", "config.yaml",
+        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
+        "--encode_batch_size", "8",
+        "--query_batch_size", "128",
+        "--densify_chunk", "1024",
+    ])
+    volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=6 * HOUR,
+)
+@with_notifications(lambda a, kw: f"eval_stage_ceiling[{kw.get('stage', a[0] if a else '?')}]")
+def eval_stage_ceiling(stage: str):
+    """Teacher-as-query ceiling for the given stage (--doc_only)."""
+    _run([
+        "scripts/eval_msmarco.py",
+        "--stage", stage,
+        "--doc_only",
+        "--config", "config.yaml",
+        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
+        "--encode_batch_size", "8",
+        "--query_batch_size", "128",
+        "--densify_chunk", "1024",
+    ])
+    volume.commit()
+
+
 # ── Default entrypoint ───────────────────────────────────────────────────────
 
 @app.local_entrypoint()
 def main():
-    """Default entrypoint. Runs setup_workspace. For everything else,
-    invoke functions explicitly, e.g.:
+    """Default entrypoint runs setup_workspace. For everything else, invoke
+    functions explicitly, e.g.:
 
-        modal run --detach modal_app.py::train_lion
+        modal run --detach modal_app.py::train_stage --stage lion_shallow_factorized_spaced5_align
     """
     setup_workspace.remote()

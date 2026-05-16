@@ -3443,6 +3443,22 @@ def train_lion_shallow_factorized_align(cfg: dict, resume: str | None = None):
         factorized=True,
     )
 
+def train_lion_shallow_factorized_spaced5_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_spaced5_align",
+        factorized=True,
+    )
+
+
+def train_lion_shallow_factorized_late_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_late_align",
+        factorized=True,
+    )
 
 def main():
     parser = argparse.ArgumentParser(description="Train SAE-SPLADE with ettin-17m")
@@ -3457,6 +3473,8 @@ def main():
             "splade_shallow_align_distill", "lion_shallow_align",
             "lion_shallow_factorized_align",
             "lion_shallow_factorized_spaced_align",
+            "lion_shallow_factorized_spaced5_align",
+            "lion_shallow_factorized_late_align",
         ],
         help="Training stage to run.",
     )
@@ -3501,6 +3519,10 @@ def main():
         train_lion_shallow_factorized_align(cfg, resume=args.resume)
     elif args.stage == "lion_shallow_factorized_spaced_align":
         train_lion_shallow_factorized_spaced_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_spaced5_align":
+        train_lion_shallow_factorized_spaced5_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_late_align":
+        train_lion_shallow_factorized_late_align(cfg, resume=args.resume)
     else:
         train_vocab_transplant(cfg, resume=args.resume)
 

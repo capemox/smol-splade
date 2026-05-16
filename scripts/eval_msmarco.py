@@ -409,6 +409,8 @@ def main():
             "lion_shallow_align",
             "lion_shallow_factorized_align",
             "lion_shallow_factorized_spaced_align",
+            "lion_shallow_factorized_spaced5_align",
+            "lion_shallow_factorized_late_align",
         ],
         help="Model type to evaluate (selects config section and model class)",
     )
@@ -463,6 +465,8 @@ def main():
         "lion_shallow_align",
         "lion_shallow_factorized_align",
         "lion_shallow_factorized_spaced_align",
+        "lion_shallow_factorized_spaced5_align",
+        "lion_shallow_factorized_late_align",
     ):
         sc = cfg[args.stage]
         query_max_length = sc["query_max_length"]
