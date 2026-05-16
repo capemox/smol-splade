@@ -310,6 +310,31 @@ def train_lion():
 
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=6 * HOUR,
+)
+@with_notifications("eval_lion_ceiling")
+def eval_lion_ceiling():
+    """Apples-to-apples ceiling for eval_lion: encodes dev queries with the
+    frozen Lion-SP-1B teacher (no student, no checkpoint), then retrieves
+    against the same prebuilt Lion index. The --doc_only flag is built into
+    eval_msmarco.py for exactly this purpose."""
+    _run([
+        "scripts/eval_msmarco.py",
+        "--stage", "lion_shallow_factorized_align",
+        "--doc_only",
+        "--config", "config.yaml",
+        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
+        "--encode_batch_size", "8",
+        "--query_batch_size", "128",
+        "--densify_chunk", "1024",
+    ])
+    volume.commit()
+
 
 @app.function(
     image=image,
