@@ -838,7 +838,7 @@ lion_shallow_factorized_late_align:
   save_every: 10_000
   output_dir: "lion_shallow_factorized_late_align"
 
-  lion_shallow_factorized_late_h768_align:
+lion_shallow_factorized_late_h768_align:
   lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
   n_layers: 5
   layer_indices: [0, 5, 10, 13, 15]    # same layers as late
