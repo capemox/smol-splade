@@ -367,7 +367,12 @@ def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
             sc["n_layers"],
             layer_indices=sc.get("layer_indices"),
         )
-    elif stage in ("lion_shallow_factorized_align", "lion_shallow_factorized_spaced_align"):
+    elif stage in (
+    "lion_shallow_factorized_align",
+    "lion_shallow_factorized_spaced_align",
+    "lion_shallow_factorized_spaced5_align",
+    "lion_shallow_factorized_late_align",
+):
         from model import ShallowFactorizedLionQuery
         hf_id = sc["lion_hf_id"]
         print(
