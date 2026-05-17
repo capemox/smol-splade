@@ -3188,6 +3188,9 @@ def train_lion_shallow_align(
     nway                  = int(sc.get("nway", 8))
     grad_accum          = int(sc.get("gradient_accumulation_steps", 1))
     freeze_head_after_warmup = bool(sc.get("freeze_head_after_warmup", True))
+    align_loss_kind      = sc.get("align_loss_kind", "mse")  # "mse" or "cosine"
+    contrastive_coeff    = float(sc.get("contrastive_coeff", 0.0))
+    contrastive_temperature = float(sc.get("contrastive_temperature", 1.0))
 
     print(
         f"[lion-shallow] lion={sc['lion_hf_id']} | n_layers={n_layers} "
@@ -3221,7 +3224,8 @@ def train_lion_shallow_align(
             f"init={factor_init} factorized_params={query_model.factorized_param_count()/1e6:.1f}M"
         )
     else:
-        query_kwargs = {"n_layers": n_layers}
+        head_lora_rank = int(sc.get("head_lora_rank", 0))
+        query_kwargs = {"n_layers": n_layers, "head_lora_rank": head_lora_rank}
         if layer_indices is not None:
             query_kwargs["layer_indices"] = layer_indices
         query_model = ShallowLionQuery(sc["lion_hf_id"], **query_kwargs)
@@ -3315,14 +3319,18 @@ def train_lion_shallow_align(
                 body_params = list(query_model.model.model.layers.parameters())
                 body_params.extend(list(query_model.model.model.norm.parameters()))
                 body_ids = {id(p) for p in body_params}
-                head_params = [p for p in query_model.parameters() if id(p) not in body_ids]
+                # requires_grad filter excludes embed_tokens and frozen base lm_head weight
+                # (set frozen by unfreeze_all when LoRA is installed)
+                head_params = [p for p in query_model.parameters() if id(p) not in body_ids and p.requires_grad]
                 optimizer = torch.optim.AdamW([
                     {"params": body_params, "lr": current_lr},
                     {"params": head_params, "lr": current_lr * head_lr_scale},
                 ], weight_decay=weight_decay)
+                head_trainable = sum(p.numel() for p in head_params)
                 phase_msg = (
                     f"body_lr={current_lr:.2e} "
-                    f"head_lr={current_lr * head_lr_scale:.2e}"
+                    f"head_lr={current_lr * head_lr_scale:.2e} "
+                    f"head_params={head_trainable/1e6:.1f}M"
                 )
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=alignment_steps - freeze_warmup_steps, eta_min=1e-5,
@@ -3343,7 +3351,8 @@ def train_lion_shallow_align(
 
         with torch.no_grad():
             t_q_vecs = lion_doc.encode(q_texts, sc["query_max_length"]).float()
-            if do_log:
+            need_p_vecs = contrastive_coeff > 0.0 or do_log
+            if need_p_vecs:
                 enc_bs = sc.get("eval_batch_size", 8)
                 p_vecs = torch.cat([
                     lion_doc.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
@@ -3364,8 +3373,19 @@ def train_lion_shallow_align(
             q_relu = q_logits + (F.relu(q_logits) - q_logits).detach()
             q_vecs = torch.log1p(q_relu)
 
-            rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+            if align_loss_kind == "cosine":
+                rank_loss = (1.0 - F.cosine_similarity(q_vecs.float(), t_q_vecs.float())).mean()
+            else:
+                rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
             align_loss = rank_loss
+            if contrastive_coeff > 0.0:
+                passage_vecs = p_vecs.to(q_vecs.dtype)
+                scores = (q_vecs @ passage_vecs.T) / contrastive_temperature
+                labels = torch.arange(B_actual, device=scores.device) * nway
+                contrastive_loss = F.cross_entropy(scores, labels)
+                align_loss = align_loss + contrastive_coeff * contrastive_loss
+            else:
+                contrastive_loss = q_vecs.new_tensor(0.0)
             if lambda_q > 0.0:
                 lq_scale = min(1.0, step / lambda_q_warmup_steps) if lambda_q_warmup_steps > 0 else 1.0
                 align_loss = align_loss + lq_scale * lambda_q * q_vecs.sum(-1).mean()
@@ -3388,7 +3408,7 @@ def train_lion_shallow_align(
                 flops = q_vecs.detach().sum(-1).mean().item()
                 lr = optimizer.param_groups[0]["lr"]
                 phase = "warm" if in_warmup else "full"
-                if do_log and p_texts:
+                if need_p_vecs and p_texts:
                     s_scores = (q_vecs.detach().float().unsqueeze(1) * p_vecs_3d.to(q_vecs.dtype)).sum(-1)
                     s_rank1 = (s_scores.argmax(-1) == 0).float().mean().item()
                     t_rank1 = (t_scores.argmax(-1) == 0).float().mean().item()
@@ -3397,12 +3417,14 @@ def train_lion_shallow_align(
             elapsed = time.time() - t0; t0 = time.time()
             print(
                 f"[lion-shallow/{phase}] step {step+1:>6} | loss {align_loss.item():.4f} "
-                f"(rank {rank_loss.item():.3f}) | q_nnz {q_nnz:.1f} (teacher {t_nnz:.1f}) "
+                f"(rank {rank_loss.item():.3f} ctr {contrastive_loss.item():.3f}) "
+                f"| q_nnz {q_nnz:.1f} (teacher {t_nnz:.1f}) "
                 f"| flops {flops:.1f} | p@1 s={s_rank1:.2f} t={t_rank1:.2f} "
                 f"| lr {lr:.2e} | {elapsed:.0f}s"
             )
             writer.add_scalar(f"{section}/loss", align_loss.item(), step + 1)
             writer.add_scalar(f"{section}/rank_loss", rank_loss.item(), step + 1)
+            writer.add_scalar(f"{section}/contrastive_loss", contrastive_loss.item(), step + 1)
             writer.add_scalar(f"{section}/q_nnz", q_nnz, step + 1)
             writer.add_scalar(f"{section}/teacher_nnz", t_nnz, step + 1)
             writer.add_scalar(f"{section}/lr", lr, step + 1)
@@ -3444,6 +3466,54 @@ def train_lion_shallow_factorized_align(cfg: dict, resume: str | None = None):
     )
 
 
+def train_lion_shallow_factorized_align_3l(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_align_3l",
+        factorized=True,
+    )
+
+
+def train_lion_shallow_factorized_cosine_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_cosine_align",
+        factorized=True,
+    )
+
+
+def train_lion_shallow_factorized_spaced_contrastive_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_factorized_spaced_contrastive_align",
+        factorized=True,
+    )
+
+
+def train_lion_shallow_align_4l(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg, resume=resume, section="lion_shallow_align_4l", factorized=False,
+    )
+
+
+def train_lion_shallow_factorized_align_4l(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg, resume=resume, section="lion_shallow_factorized_align_4l", factorized=True,
+    )
+
+
+def train_lion_shallow_spaced_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg,
+        resume=resume,
+        section="lion_shallow_spaced_align",
+        factorized=False,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train SAE-SPLADE with ettin-17m")
     parser.add_argument(
@@ -3455,8 +3525,14 @@ def main():
             "splade_shallow_align", "splade_shallow_factorized_align",
             "splade_shallow_factorized_spaced_align",
             "splade_shallow_align_distill", "lion_shallow_align",
+            "lion_shallow_align_4l",
             "lion_shallow_factorized_align",
+            "lion_shallow_factorized_align_3l",
+            "lion_shallow_factorized_align_4l",
             "lion_shallow_factorized_spaced_align",
+            "lion_shallow_factorized_cosine_align",
+            "lion_shallow_factorized_spaced_contrastive_align",
+            "lion_shallow_spaced_align",
         ],
         help="Training stage to run.",
     )
@@ -3499,8 +3575,20 @@ def main():
         train_lion_shallow_align(cfg, resume=args.resume)
     elif args.stage == "lion_shallow_factorized_align":
         train_lion_shallow_factorized_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_align_3l":
+        train_lion_shallow_factorized_align_3l(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_align_4l":
+        train_lion_shallow_align_4l(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_align_4l":
+        train_lion_shallow_factorized_align_4l(cfg, resume=args.resume)
     elif args.stage == "lion_shallow_factorized_spaced_align":
         train_lion_shallow_factorized_spaced_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_cosine_align":
+        train_lion_shallow_factorized_cosine_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_spaced_contrastive_align":
+        train_lion_shallow_factorized_spaced_contrastive_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_spaced_align":
+        train_lion_shallow_spaced_align(cfg, resume=args.resume)
     else:
         train_vocab_transplant(cfg, resume=args.resume)
 

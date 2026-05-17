@@ -700,6 +700,108 @@ lion_shallow_align:
   output_dir: "lion_shallow_align"
 
 
+# ── Stage: Unfactorized shallow Lion, 4 layers, frozen head ──────────────────
+# Same as lion_shallow_align but with 4 layers instead of 3.
+# Run: uv run train.py lion_shallow_align_4l --config config.yaml
+lion_shallow_align_4l:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 4
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.1
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_align_4l"
+
+
+# ── Stage: Factorized shallow Lion, 4 layers, 1024-dim, trainable head ───────
+# Same as lion_shallow_factorized_align_3l but with 4 layers.
+# Run: uv run train.py lion_shallow_factorized_align_4l --config config.yaml
+lion_shallow_factorized_align_4l:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 4
+  factorized_embedding_dim: 1024
+  factorization_init: "svd"
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.005
+  freeze_head_after_warmup: false
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_align_4l"
+
+
+# ── Stage: Factorized shallow Lion, 3 layers, matched to lion_shallow_align ──
+# Identical to lion_shallow_align but replaces the tied 128k×2048 embed/lm_head
+# with an SVD-factorized version (128k×256×2048), making the head trainable at
+# low memory cost. Everything else (lr, lambda_q, nway, batch) is unchanged.
+#
+# Run: uv run train.py lion_shallow_factorized_align_3l --config config.yaml
+lion_shallow_factorized_align_3l:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 3
+  factorized_embedding_dim: 1024
+  factorization_init: "svd"
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.005
+  freeze_head_after_warmup: false
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_align_3l"
+
+
 # ── Stage: Factorized shallow Lion with first 3 layers ───────────────────────
 # Same hyperparameters as lion_shallow_factorized_spaced_align, but keeps the
 # first 3 Lion layers contiguously instead of selecting [0, 6, -1].
@@ -736,9 +838,122 @@ lion_shallow_factorized_align:
   output_dir: "lion_shallow_factorized_align"
 
 
+# ── Stage: Factorized shallow Lion with cosine alignment loss ─────────────────
+# Same as lion_shallow_factorized_align but uses cosine similarity loss instead
+# of MSE on SPLADE vectors. Cosine is scale-invariant and may generalise better
+# when the student's vector magnitudes diverge from the teacher's.
+#
+# Run: uv run train.py lion_shallow_factorized_cosine_align --config config.yaml
+lion_shallow_factorized_cosine_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 5
+  factorized_embedding_dim: 256
+  factorization_init: "svd"
+  align_loss_kind: "cosine"
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01
+  freeze_head_after_warmup: false
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_cosine_align"
+
+
+# ── Stage: Factorized spaced shallow Lion with contrastive alignment ──────────
+# Key changes vs lion_shallow_factorized_align:
+#   1. Spaced layers [0, 3, 6, 10, -1] — captures more of Lion's representational range
+#   2. Contrastive CE loss against frozen Lion passage vectors — direct retrieval signal
+#   3. Stronger lambda_q (0.003) — forces q_nnz toward teacher's ~267 (was stuck at ~707)
+#
+# Run: uv run train.py lion_shallow_factorized_spaced_contrastive_align --config config.yaml
+lion_shallow_factorized_spaced_contrastive_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 5
+  layer_indices: [0, 3, 6, 10, -1]
+  factorized_embedding_dim: 256
+  factorization_init: "svd"
+
+  contrastive_coeff: 0.1
+  contrastive_temperature: 1.0
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.01
+  freeze_head_after_warmup: false
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.003
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_factorized_spaced_contrastive_align"
+
+
+# ── Stage: Non-factorized shallow Lion with spaced doc layers (no contrastive) ─
+# Same hyperparams as lion_shallow_factorized_spaced_contrastive_align but with
+# factorized=False and no contrastive loss, to isolate their effect.
+#
+# Run: uv run train.py lion_shallow_spaced_align --config config.yaml
+lion_shallow_spaced_align:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+  n_layers: 3
+
+  queries_dataset: "Tevatron/msmarco-passage"
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+
+  freeze_warmup_steps: 5_000
+  head_lr_scale: 0.1
+
+  alignment_steps: 50_000
+  alignment_lr: 2.0e-4
+  weight_decay: 0.01
+  fp16: true
+
+  nway: 8
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5_000
+
+  log_every: 200
+  save_every: 10_000
+  output_dir: "lion_shallow_spaced_align"
+
+
 # ── Stage: Factorized shallow Lion with spaced doc layers ────────────────────
 # Lion analog of splade_shallow_factorized_spaced_align.
-# Query encoder = Lion layers [0, 6, -1] with an ALBERT-style tied
+# Query encoder = 5 spaced Lion layers [0, 3, 6, 10, -1] with an ALBERT-style tied
 # factorized embed_tokens / lm_head lexical matrix. The factorized lexical
 # factors/head unfreeze after warmup at a low LR, so this isolates whether
 # training the compressed Lion lexical basis helps.
@@ -746,8 +961,8 @@ lion_shallow_factorized_align:
 # Run: uv run train.py lion_shallow_factorized_spaced_align --config config.yaml
 lion_shallow_factorized_spaced_align:
   lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 3
-  layer_indices: [0, 6, -1]       # first, 7th, and last layer from Lion-SP-1B
+  n_layers: 5
+  layer_indices: [0, 3, 6, 10, -1]  # spaced 5-layer slice from Lion-SP-1B
   factorized_embedding_dim: 256
   factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
 

@@ -35,21 +35,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 DEFAULT_DATASETS = [
-    # Standard 13-dataset BEIR benchmark (excludes MSMARCO training set and
-    # CQADupStack which requires per-subtopic handling)
-    "nfcorpus",         # ~3.6K docs
-    "scifact",          # ~5K docs
-    "arguana",          # ~8.6K docs
-    "scidocs",          # ~25K docs
-    "fiqa",             # ~57K docs
-    "webis-touche2020", # ~382K docs
-    "trec-covid",       # ~171K docs
-    "quora",            # ~523K docs
-    "dbpedia-entity",   # ~4.6M docs
-    "nq",               # ~2.7M docs
-    "hotpotqa",         # ~5.2M docs
-    "fever",            # ~5.4M docs
-    "climate-fever",    # ~5.4M docs
+    # Small BEIR datasets (≤60K docs) — suitable for in-memory or indexed eval
+    "nfcorpus",  # ~3.6K docs, 323 queries
+    "scifact",   # ~5K docs,   300 queries
+    "arguana",   # ~8.6K docs, 1,406 queries
+    "scidocs",   # ~25K docs,  1,000 queries
+    "fiqa",      # ~57K docs,  648 queries
 ]
 
 
@@ -258,6 +249,60 @@ def mrr_at_k(ranked, qrels, query_ids, k=10):
     return sum(scores) / len(scores) if scores else 0.0
 
 
+# ── Model loading helpers ─────────────────────────────────────────────────────
+
+def _infer_factor_dim(state: dict, config_fallback: int) -> int:
+    for k, v in state.items():
+        if "lexical_embeddings.weight" in k:
+            return v.shape[1]
+    return config_fallback
+
+
+def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
+    ckpt = torch.load(checkpoint, map_location="cpu")
+    state = ckpt["model"]
+
+    if stage == "splade_shallow_align":
+        from model import ShallowSpladeQuery
+        model = ShallowSpladeQuery(
+            sc["doc_splade_hf_id"], sc["n_layers"],
+            layer_indices=sc.get("layer_indices"),
+        )
+        print(f"Loading ShallowSpladeQuery ({sc['n_layers']} layers) from {checkpoint} ...")
+    elif stage in ("splade_shallow_factorized_align", "splade_shallow_factorized_spaced_align"):
+        from model import ShallowFactorizedSpladeQuery
+        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
+        print(f"Loading ShallowFactorizedSpladeQuery ({sc['n_layers']} layers, factor_dim={factor_dim}) from {checkpoint} ...")
+        model = ShallowFactorizedSpladeQuery(
+            sc["doc_splade_hf_id"], sc["n_layers"],
+            factorized_embedding_dim=factor_dim, init="random",
+            layer_indices=sc.get("layer_indices"),
+        )
+    elif stage in ("lion_shallow_align", "lion_shallow_align_4l"):
+        from model import ShallowLionQuery
+        print(f"Loading ShallowLionQuery ({sc['n_layers']} layers) from {checkpoint} ...")
+        model = ShallowLionQuery(
+            sc["lion_hf_id"], sc["n_layers"],
+            layer_indices=sc.get("layer_indices"),
+        )
+    elif stage in ("lion_shallow_factorized_align", "lion_shallow_factorized_align_3l", "lion_shallow_factorized_align_4l", "lion_shallow_factorized_spaced_align"):
+        from model import ShallowFactorizedLionQuery
+        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
+        print(f"Loading ShallowFactorizedLionQuery ({sc['n_layers']} layers, factor_dim={factor_dim}) from {checkpoint} ...")
+        model = ShallowFactorizedLionQuery(
+            sc["lion_hf_id"], sc["n_layers"],
+            factorized_embedding_dim=factor_dim, init="random",
+            layer_indices=sc.get("layer_indices"),
+        )
+    else:
+        raise ValueError(f"Unsupported shallow stage: {stage}")
+
+    model.load_state_dict(state)
+    model.to(device).eval()
+    print(f"  Step: {ckpt.get('step', 'unknown')}")
+    return model, model.tokenizer
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -268,13 +313,28 @@ def main():
     )
     parser.add_argument(
         "--doc_only", action="store_true",
-        help="Use doc SPLADE for both query and doc encoding (upper-bound ceiling)",
+        help="Use doc encoder for both query and doc encoding (upper-bound ceiling)",
     )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
-        "--config_section", default="vocab_transplant",
-        help="Config section to read query_hf_id, transplant_dir, and max_lengths from "
-             "(use 'vocab_transplant_align' for alignment-only checkpoints)",
+        "--stage",
+        default="vocab_transplant",
+        choices=[
+            "vocab_transplant",
+            "vocab_transplant_align",
+            "splade_shallow_align",
+            "splade_shallow_factorized_align",
+            "splade_shallow_factorized_spaced_align",
+            "lion_shallow_align",
+            "lion_shallow_factorized_align",
+            "lion_shallow_factorized_align_3l",
+            "lion_shallow_factorized_align_4l",
+            "lion_shallow_align_4l",
+            "lion_shallow_factorized_spaced_align",
+            "lion_shallow_factorized_cosine_align",
+            "lion_shallow_factorized_spaced_contrastive_align",
+        ],
+        help="Config section to load doc encoder and query model from",
     )
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS,
                         help="BEIR dataset names (loaded as BeIR/<name>)")
@@ -296,38 +356,50 @@ def main():
 
     import yaml
     cfg = yaml.safe_load(open(args.config))
-    vc = cfg[args.config_section]
+    sc = cfg[args.stage]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
-    from transformers import AutoTokenizer
-
-    print(f"Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} ...")
-    doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
+    if args.stage.startswith("lion_"):
+        from model import FrozenLionSPLADE
+        doc_hf_id = sc["lion_hf_id"]
+        print(f"Loading frozen Lion doc encoder: {doc_hf_id} ...")
+        doc_splade = FrozenLionSPLADE(doc_hf_id)
+    else:
+        from model import FrozenDocSPLADE
+        doc_hf_id = sc.get("doc_splade_hf_id") or cfg["vocab_transplant"]["doc_splade_hf_id"]
+        print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
+        doc_splade = FrozenDocSPLADE(doc_hf_id)
     doc_splade.to(device)
     doc_splade.eval()
 
     query_model     = None
     query_tokenizer = None
     if not args.doc_only:
-        transplant_dir = str(
-            Path(f"checkpoints_{vc['query_hf_id'].split('/')[-1]}") / vc["transplant_dir"]
-        )
-        if not Path(transplant_dir, "config.json").exists():
-            raise SystemExit(
-                f"Transplant directory not found: {transplant_dir}\n"
-                f"Check {args.config_section}.query_hf_id and .transplant_dir in config.yaml."
+        if args.stage in ("vocab_transplant", "vocab_transplant_align"):
+            from model import VocabTransplantQuerySPLADE
+            from transformers import AutoTokenizer
+            transplant_dir = str(
+                Path(f"checkpoints_{sc['query_hf_id'].split('/')[-1]}") / sc["transplant_dir"]
             )
-        print(f"Loading query model from {args.checkpoint} ...")
-        query_model = VocabTransplantQuerySPLADE(transplant_dir)
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-        query_model.load_state_dict(ckpt["model"])
-        query_model.to(device)
-        query_model.eval()
-        query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
-        print(f"  Step: {ckpt.get('step', 'unknown')}")
+            if not Path(transplant_dir, "config.json").exists():
+                raise SystemExit(
+                    f"Transplant directory not found: {transplant_dir}\n"
+                    f"Check {args.stage}.query_hf_id and .transplant_dir in config.yaml."
+                )
+            print(f"Loading VocabTransplantQuerySPLADE from {args.checkpoint} ...")
+            query_model = VocabTransplantQuerySPLADE(transplant_dir)
+            ckpt = torch.load(args.checkpoint, map_location="cpu")
+            query_model.load_state_dict(ckpt["model"])
+            query_model.to(device)
+            query_model.eval()
+            query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
+            print(f"  Step: {ckpt.get('step', 'unknown')}")
+        else:
+            query_model, query_tokenizer = _load_shallow_query_model(
+                args.stage, sc, args.checkpoint, device
+            )
 
     base_index_dir = Path(args.index_dir)
     all_results: dict = {}
@@ -346,28 +418,28 @@ def main():
 
         # Encode queries
         if args.doc_only:
-            print(f"  Encoding queries with doc SPLADE (ceiling) ...")
+            print(f"  Encoding queries with doc encoder (ceiling) ...")
             query_vecs = encode_with_doc_splade(
-                doc_splade, query_texts, vc["query_max_length"], args.encode_batch_size
+                doc_splade, query_texts, sc["query_max_length"], args.encode_batch_size
             )
         else:
             print(f"  Encoding queries with query model ...")
             query_vecs = encode_with_query_model(
                 query_model, query_tokenizer, query_texts,
-                vc["query_max_length"], args.encode_batch_size, device,
+                sc["query_max_length"], args.encode_batch_size, device,
             )
 
         # Retrieve: prefer pre-built index, fall back to in-memory
-        index_dir     = base_index_dir / name
+        index_dir     = base_index_dir / args.stage / name
         manifest_path = index_dir / "manifest.json"
 
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text())
-            if manifest.get("doc_splade_hf_id") != vc["doc_splade_hf_id"]:
+            if manifest.get("doc_splade_hf_id") != doc_hf_id:
                 print(
                     f"  WARNING: index was built for {manifest['doc_splade_hf_id']!r} "
-                    f"but config has {vc['doc_splade_hf_id']!r}. Skipping {name}.\n"
-                    f"  Delete {index_dir} and rebuild with build_beir_index.py."
+                    f"but config has {doc_hf_id!r}. Skipping {name}.\n"
+                    f"  Delete {index_dir} and rebuild with build_beir_index.py --stage {args.stage}."
                 )
                 continue
             vocab_size   = int(manifest["vocab_size"])
@@ -382,7 +454,7 @@ def main():
             print(f"  No index found at {index_dir} — encoding corpus on-the-fly.")
             print(
                 f"  (Build an index for faster repeated eval: "
-                f"uv run scripts/build_beir_index.py --datasets {name})"
+                f"uv run scripts/build_beir_index.py --stage {args.stage} --datasets {name})"
             )
             from datasets import load_dataset
             corpus_ds    = load_dataset(f"BeIR/{name}", "corpus", split="corpus")
@@ -390,7 +462,7 @@ def main():
             corpus_texts = [_corpus_text(r) for r in corpus_ds]
             ranked, n_docs = inmemory_retrieve(
                 query_vecs, doc_splade, corpus_ids, corpus_texts,
-                vc["doc_max_length"], args.doc_batch_size, args.topk, device,
+                sc["doc_max_length"], args.doc_batch_size, args.topk, device,
             )
             corpus_label = f"in-memory ({n_docs:,} docs)"
 
@@ -405,12 +477,12 @@ def main():
 
     # Summary table
     ckpt_label = (
-        f"{vc['doc_splade_hf_id']} (doc_only ceiling)"
+        f"{doc_hf_id} (doc_only ceiling)"
         if args.doc_only else args.checkpoint
     )
     print(f"\n{'='*60}")
     print(f"Checkpoint : {ckpt_label}")
-    print(f"Section    : {args.config_section}")
+    print(f"Stage      : {args.stage}")
     print(f"{'─'*60}")
     print(f"{'Dataset':<20} {'NDCG@10':>10} {'MRR@10':>10}")
     print(f"{'─'*42}")

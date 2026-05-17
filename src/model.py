@@ -9,6 +9,32 @@ import torch.nn.functional as F
 from transformers import AutoModel
 
 
+class LoRALinear(nn.Module):
+    """Low-rank adapter wrapping a frozen Linear layer.
+
+    forward(x) = frozen(x) + lora_B(lora_A(x))
+
+    lora_B is zero-initialised so the adapter starts as identity at init.
+    Only lora_A and lora_B have requires_grad=True; the base weight stays frozen.
+    """
+
+    def __init__(self, linear: nn.Linear, rank: int):
+        super().__init__()
+        out_features, in_features = linear.weight.shape
+        self.linear = linear
+        self.linear.weight.requires_grad_(False)
+        if self.linear.bias is not None:
+            self.linear.bias.requires_grad_(False)
+        dtype = linear.weight.dtype
+        self.lora_A = nn.Linear(in_features, rank, bias=False, dtype=dtype)
+        self.lora_B = nn.Linear(rank, out_features, bias=False, dtype=dtype)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x) + self.lora_B(self.lora_A(x))
+
+
 class TopKSAE(nn.Module):
     """TopK Sparse Autoencoder.
 
@@ -718,7 +744,7 @@ class ShallowLionQuery(nn.Module):
         log1p(relu(max_pool(logits * hidden_size^-0.25)))
     """
 
-    def __init__(self, hf_id: str, n_layers: int, layer_indices: Optional[List[int]] = None):
+    def __init__(self, hf_id: str, n_layers: int, layer_indices: Optional[List[int]] = None, head_lora_rank: int = 0):
         super().__init__()
         import json
         from huggingface_hub import hf_hub_download
@@ -778,6 +804,12 @@ class ShallowLionQuery(nn.Module):
         self.n_layers = n_layers
         self.original_n_layers = original_n
 
+        if head_lora_rank > 0:
+            self.model.lm_head = LoRALinear(self.model.lm_head, head_lora_rank)
+            print(f"[ShallowLionQuery] Installed LoRA on lm_head (rank={head_lora_rank}, "
+                  f"trainable={sum(p.numel() for p in self.model.lm_head.lora_A.parameters()) + sum(p.numel() for p in self.model.lm_head.lora_B.parameters()):,} params)")
+        self.head_lora_rank = head_lora_rank
+
     def freeze_for_warmup(self) -> None:
         """Freeze embeddings and LM head; only the kept body layers train."""
         for p in self.parameters():
@@ -786,8 +818,19 @@ class ShallowLionQuery(nn.Module):
             p.requires_grad_(True)
 
     def unfreeze_all(self) -> None:
+        """Unfreeze body + head LoRA adapter (if any); keep embed_tokens and base lm_head frozen.
+
+        embed_tokens (262M) and the full lm_head weight (262M) each cost ~2 GB of AdamW
+        optimizer state on an 8 GB GPU — always keep them frozen. Only the lightweight
+        LoRA adapter (if installed) trains in place of the full lm_head.
+        """
         for p in self.parameters():
             p.requires_grad_(True)
+        # embed_tokens stays frozen — 262M params × 8 bytes AdamW = 2 GB alone
+        self.model.model.embed_tokens.weight.requires_grad_(False)
+        # lm_head base weight stays frozen if LoRA is installed
+        if isinstance(self.model.lm_head, LoRALinear):
+            self.model.lm_head.linear.weight.requires_grad_(False)
 
     def trainable_param_count(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -868,6 +911,11 @@ class ShallowFactorizedLionQuery(ShallowLionQuery):
             dtype=old_lm_head.weight.dtype,
         )
         self.model.config.tie_word_embeddings = True
+
+    def unfreeze_all(self) -> None:
+        """Unfreeze everything — factorized embed/head is small enough to train freely."""
+        for p in self.parameters():
+            p.requires_grad_(True)
 
     def factorized_param_count(self) -> int:
         emb = self.model.model.embed_tokens

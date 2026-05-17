@@ -1348,8 +1348,8 @@ def test_lion_shallow_factorized_spaced_align_config():
     sc = cfg["lion_shallow_factorized_spaced_align"]
 
     assert sc["lion_hf_id"] == "hzeng/Lion-SP-1B-llama3-marco-mntp"
-    assert sc["n_layers"] == 3
-    assert sc["layer_indices"] == [0, 6, -1], "should use first, seventh, and last Lion-SP-1B layers"
+    assert sc["n_layers"] == 5
+    assert sc["layer_indices"] == [0, 3, 6, 10, -1], "should use a spaced 5-layer Lion-SP-1B slice"
     assert sc["factorized_embedding_dim"] == 256
     assert sc["factorization_init"] == "svd"
     assert sc["freeze_head_after_warmup"] is False, "Lion factorized run should unfreeze lexical factors after warmup"

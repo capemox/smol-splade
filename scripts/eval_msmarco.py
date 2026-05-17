@@ -58,7 +58,7 @@ def load_dev_queries_and_qrels():
 # ── Encoding ──────────────────────────────────────────────────────────────────
 
 def encode_queries(query_model, tokenizer, query_texts, max_length, batch_size, device):
-    """Encode all dev queries with the query model; returns fp32 CPU tensor [Q, vocab]."""
+    """Encode all dev queries; returns fp16 CPU tensor [Q, vocab]."""
     all_vecs = []
     query_model.eval()
     with torch.no_grad():
@@ -70,59 +70,94 @@ def encode_queries(query_model, tokenizer, query_texts, max_length, batch_size, 
             vecs = query_model.encode(
                 enc["input_ids"].to(device), enc["attention_mask"].to(device)
             )
-            all_vecs.append(vecs.cpu().float())
+            all_vecs.append(vecs.cpu().half())
             print(f"  queries: {min(i+batch_size, len(query_texts))}/{len(query_texts)}", end="\r")
     print()
-    return torch.cat(all_vecs, dim=0)
+    result = torch.cat(all_vecs, dim=0)
+    del all_vecs
+    return result
 
 
 def encode_queries_with_doc_splade(doc_splade, query_texts, max_length, batch_size):
-    """Encode queries using the frozen doc SPLADE (ceiling / doc-only benchmark)."""
+    """Encode queries using the frozen doc SPLADE (ceiling / doc-only benchmark); returns fp16."""
     all_vecs = []
     for i in range(0, len(query_texts), batch_size):
         batch = query_texts[i : i + batch_size]
         vecs = doc_splade.encode(batch, max_length, no_grad=True)
-        all_vecs.append(vecs.cpu().float())
+        all_vecs.append(vecs.cpu().half())
         print(f"  queries (doc_splade): {min(i+batch_size, len(query_texts))}/{len(query_texts)}", end="\r")
     print()
-    return torch.cat(all_vecs, dim=0)
+    result = torch.cat(all_vecs, dim=0)
+    del all_vecs
+    return result
 
 
 # ── Corpus subset ─────────────────────────────────────────────────────────────
 
-def build_or_load_subset(full_corpus: dict, qrels: dict, max_corpus_size: int) -> tuple:
+def resolve_corpus_subset(
+    max_corpus_size: int,
+    corpus_dataset: str,
+    text_field: str,
+    qrels: dict,
+) -> tuple:
     """Return (corpus_ids, corpus_texts) for a subset of at most max_corpus_size passages.
 
-    All passages that are relevant to at least one dev query are always included.
-    The remainder is filled with randomly sampled distractors from the full corpus.
-    The result is pickled to data/ so subsequent runs are instant.
+    Always includes every passage relevant to a dev query; the remainder is
+    reservoir-sampled distractors. Streams from HuggingFace so peak RAM is
+    O(max_corpus_size), not O(full corpus). Result is cached to
+    data/msmarco_dev_subset_N.pkl so subsequent calls are instant.
     """
-    import pickle, random
-    from pathlib import Path
+    import pickle
+    import random
+    from datasets import load_dataset
 
     cache = Path("data") / f"msmarco_dev_subset_{max_corpus_size}.pkl"
     if cache.exists():
-        print(f"Loading corpus subset from {cache} ...")
+        print(f"Loading corpus subset from cache {cache} ...")
         with cache.open("rb") as f:
             return pickle.load(f)
 
-    print(f"Building {max_corpus_size:,}-passage subset (includes all relevant docs) ...")
-    relevant_ids = {did for rel in qrels.values() for did in rel}
-    relevant_ids = {did for did in relevant_ids if did in full_corpus}
+    required_ids = {did for rel in qrels.values() for did in rel}
+    n_distractor_slots = max(0, max_corpus_size - len(required_ids))
+    print(
+        f"Streaming {corpus_dataset} to build {max_corpus_size:,}-passage subset "
+        f"({len(required_ids):,} required + {n_distractor_slots:,} reservoir distractors) ..."
+    )
 
-    distractor_pool = [k for k in full_corpus if k not in relevant_ids]
-    n_distractors = max(0, max_corpus_size - len(relevant_ids))
-    distractors = random.sample(distractor_pool, min(n_distractors, len(distractor_pool)))
+    relevant: dict = {}   # docid -> text; always kept
+    reservoir: list = []  # [(docid, text)]; reservoir-sampled distractors
+    n_distractor_seen = 0
 
-    subset_ids = list(relevant_ids) + distractors
-    random.shuffle(subset_ids)
-    subset_texts = [full_corpus[k] for k in subset_ids]
+    ds = load_dataset(corpus_dataset, split="train", streaming=True)
+    for item in ds:
+        docid = str(item.get("docid", ""))
+        text = item.get(text_field) or item.get("passage") or item.get("contents", "")
+        if docid in required_ids:
+            relevant[docid] = text
+        else:
+            n_distractor_seen += 1
+            if len(reservoir) < n_distractor_slots:
+                reservoir.append((docid, text))
+            elif n_distractor_slots > 0:
+                j = random.randrange(n_distractor_seen)
+                if j < n_distractor_slots:
+                    reservoir[j] = (docid, text)
 
-    print(f"  {len(relevant_ids):,} relevant + {len(distractors):,} distractors = {len(subset_ids):,} total")
+    missing = len(required_ids) - len(relevant)
+    if missing:
+        print(f"  Warning: {missing:,} relevant doc IDs not found in corpus")
+
+    combined = list(relevant.items()) + reservoir
+    random.shuffle(combined)
+    corpus_ids = [d for d, _ in combined]
+    corpus_texts = [t for _, t in combined]
+
+    print(f"  {len(relevant):,} relevant + {len(reservoir):,} distractors = {len(corpus_ids):,} total")
+    Path("data").mkdir(exist_ok=True)
     with cache.open("wb") as f:
-        pickle.dump((subset_ids, subset_texts), f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump((corpus_ids, corpus_texts), f, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"  Cached → {cache}")
-    return subset_ids, subset_texts
+    return corpus_ids, corpus_texts
 
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
@@ -330,9 +365,25 @@ def mrr_at_k(ranked, qrels, query_ids, k=10):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _infer_factor_dim(state: dict, config_fallback: int) -> int:
+    """Read factorized_embedding_dim from checkpoint weights rather than config."""
+    for k, v in state.items():
+        if "lexical_embeddings.weight" in k:
+            return v.shape[1]
+    return config_fallback
+
+
 def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
-    """Load a shallow query model from a checkpoint."""
+    """Load a shallow query model from a checkpoint.
+
+    Loads the checkpoint before constructing the model so architecture
+    hyperparameters (e.g. factorized_embedding_dim) are read from the saved
+    weights rather than from config — avoids shape mismatches when config drifts.
+    """
     import torch
+    ckpt = torch.load(checkpoint, map_location="cpu")
+    state = ckpt["model"]
+
     if stage == "splade_shallow_align":
         from model import ShallowSpladeQuery
         hf_id = sc["doc_splade_hf_id"]
@@ -345,16 +396,17 @@ def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
     elif stage in ("splade_shallow_factorized_align", "splade_shallow_factorized_spaced_align"):
         from model import ShallowFactorizedSpladeQuery
         hf_id = sc["doc_splade_hf_id"]
+        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
         print(
             f"Loading ShallowFactorizedSpladeQuery ({sc['n_layers']} layers, "
-            f"factor_dim={sc.get('factorized_embedding_dim', 128)}, "
+            f"factor_dim={factor_dim}, "
             f"layers={sc.get('layer_indices', list(range(sc['n_layers'])))}"
             f") from {checkpoint} ..."
         )
         model = ShallowFactorizedSpladeQuery(
             hf_id,
             sc["n_layers"],
-            factorized_embedding_dim=sc.get("factorized_embedding_dim", 128),
+            factorized_embedding_dim=factor_dim,
             init="random",
             layer_indices=sc.get("layer_indices"),
         )
@@ -370,23 +422,24 @@ def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
     elif stage in ("lion_shallow_factorized_align", "lion_shallow_factorized_spaced_align"):
         from model import ShallowFactorizedLionQuery
         hf_id = sc["lion_hf_id"]
+        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
         print(
             f"Loading ShallowFactorizedLionQuery ({sc['n_layers']} layers, "
-            f"factor_dim={sc.get('factorized_embedding_dim', 128)}, "
+            f"factor_dim={factor_dim}, "
             f"layers={sc.get('layer_indices', list(range(sc['n_layers'])))}"
             f") from {checkpoint} ..."
         )
         model = ShallowFactorizedLionQuery(
             hf_id,
             sc["n_layers"],
-            factorized_embedding_dim=sc.get("factorized_embedding_dim", 128),
+            factorized_embedding_dim=factor_dim,
             init="random",
             layer_indices=sc.get("layer_indices"),
         )
     else:
         raise ValueError(f"Unsupported shallow stage: {stage}")
-    ckpt = torch.load(checkpoint, map_location="cpu")
-    model.load_state_dict(ckpt["model"])
+
+    model.load_state_dict(state)
     model.to(device).eval()
     print(f"  Step: {ckpt.get('step', 'unknown')}")
     return model, model.tokenizer
@@ -521,6 +574,7 @@ def main():
             ckpt_label = args.checkpoint
 
         corpus_dataset = cfg["sae"]["corpus_dataset"]
+        text_field = cfg["sae"].get("corpus_text_field", "text")
 
         if has_index:
             index_dir = Path(args.index_dir)
@@ -546,20 +600,9 @@ def main():
             )
             corpus_label = f"{n_indexed:,}-passage on-disk index"
         else:
-            import pickle
-            subset_cache = Path("data") / f"msmarco_dev_subset_{args.max_corpus_size}.pkl"
-            if subset_cache.exists():
-                print(f"Loading corpus subset from cache {subset_cache} ...")
-                with subset_cache.open("rb") as f:
-                    corpus_ids, corpus_texts = pickle.load(f)
-            else:
-                pickle_path = Path("data") / (corpus_dataset.replace("/", "__") + ".pkl")
-                print(f"Loading corpus pickle for subset build ...")
-                with pickle_path.open("rb") as f:
-                    full_corpus = pickle.load(f)
-                corpus_ids, corpus_texts = build_or_load_subset(full_corpus, qrels, args.max_corpus_size)
-                del full_corpus
-                gc.collect()
+            corpus_ids, corpus_texts = resolve_corpus_subset(
+                args.max_corpus_size, corpus_dataset, text_field, qrels
+            )
 
             # Convert to fp16 to halve query-vec RAM (critical for large-vocab models like Lion)
             query_vecs = query_vecs.half()
@@ -622,22 +665,12 @@ def main():
             ckpt_label = args.checkpoint
 
         corpus_dataset = cfg["sae"]["corpus_dataset"]
+        text_field = cfg["sae"].get("corpus_text_field", "text")
 
         if args.max_corpus_size > 0:
-            import pickle
-            subset_cache = Path("data") / f"msmarco_dev_subset_{args.max_corpus_size}.pkl"
-            if subset_cache.exists():
-                print(f"Loading corpus subset from cache {subset_cache} ...")
-                with subset_cache.open("rb") as f:
-                    corpus_ids, corpus_texts = pickle.load(f)
-            else:
-                pickle_path = Path("data") / (corpus_dataset.replace("/", "__") + ".pkl")
-                print(f"Loading corpus pickle for subset build ...")
-                with pickle_path.open("rb") as f:
-                    full_corpus = pickle.load(f)
-                corpus_ids, corpus_texts = build_or_load_subset(full_corpus, qrels, args.max_corpus_size)
-                del full_corpus
-                gc.collect()
+            corpus_ids, corpus_texts = resolve_corpus_subset(
+                args.max_corpus_size, corpus_dataset, text_field, qrels
+            )
 
             query_vecs = query_vecs.half()
             gc.collect()

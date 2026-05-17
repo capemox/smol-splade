@@ -28,21 +28,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 DEFAULT_DATASETS = [
-    # Standard 13-dataset BEIR benchmark (excludes MSMARCO training set and
-    # CQADupStack which requires per-subtopic handling)
-    "nfcorpus",         # ~3.6K docs
-    "scifact",          # ~5K docs
-    "arguana",          # ~8.6K docs
-    "scidocs",          # ~25K docs
-    "fiqa",             # ~57K docs
-    "webis-touche2020", # ~382K docs
-    "trec-covid",       # ~171K docs
-    "quora",            # ~523K docs
-    "dbpedia-entity",   # ~4.6M docs
-    "nq",               # ~2.7M docs
-    "hotpotqa",         # ~5.2M docs
-    "fever",            # ~5.4M docs
-    "climate-fever",    # ~5.4M docs
+    # Small BEIR datasets (≤60K docs) — suitable for in-memory or indexed eval
+    "nfcorpus",  # ~3.6K docs, 323 queries
+    "scifact",   # ~5K docs,   300 queries
+    "arguana",   # ~8.6K docs, 1,406 queries
+    "scidocs",   # ~25K docs,  1,000 queries
+    "fiqa",      # ~57K docs,  648 queries
 ]
 
 
@@ -224,8 +215,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
-        "--config_section", default="vocab_transplant",
-        help="Config section to read doc_splade_hf_id and doc_max_length from",
+        "--stage",
+        default="vocab_transplant",
+        choices=[
+            "vocab_transplant",
+            "splade_shallow_align",
+            "splade_shallow_factorized_align",
+            "splade_shallow_factorized_spaced_align",
+            "lion_shallow_align",
+            "lion_shallow_factorized_align",
+            "lion_shallow_factorized_spaced_align",
+            "lion_shallow_factorized_cosine_align",
+            "lion_shallow_factorized_spaced_contrastive_align",
+        ],
+        help="Config section whose frozen doc encoder builds the index",
     )
     parser.add_argument(
         "--datasets", nargs="+", default=DEFAULT_DATASETS,
@@ -245,14 +248,21 @@ def main():
 
     import yaml
     cfg = yaml.safe_load(open(args.config))
-    vc = cfg[args.config_section]
+    sc = cfg[args.stage]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    from model import FrozenDocSPLADE
-    print(f"Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} ...")
-    doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
+    if args.stage.startswith("lion_"):
+        from model import FrozenLionSPLADE
+        doc_hf_id = sc["lion_hf_id"]
+        print(f"Loading frozen Lion SPLADE: {doc_hf_id} ...")
+        doc_splade = FrozenLionSPLADE(doc_hf_id)
+    else:
+        from model import FrozenDocSPLADE
+        doc_hf_id = sc.get("doc_splade_hf_id") or cfg["vocab_transplant"]["doc_splade_hf_id"]
+        print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
+        doc_splade = FrozenDocSPLADE(doc_hf_id)
     doc_splade.to(device)
     doc_splade.eval()
 
@@ -262,10 +272,10 @@ def main():
     for name in args.datasets:
         build_dataset_index(
             name=name,
-            doc_splade_hf_id=vc["doc_splade_hf_id"],
+            doc_splade_hf_id=doc_hf_id,
             doc_splade=doc_splade,
-            doc_max_length=vc["doc_max_length"],
-            index_dir=base_index_dir / name,
+            doc_max_length=sc["doc_max_length"],
+            index_dir=base_index_dir / args.stage / name,
             batch_size=args.batch_size,
             shard_size=args.shard_size,
             use_bf16=use_bf16,

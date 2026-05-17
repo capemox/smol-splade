@@ -1,0 +1,613 @@
+%% Draft paper for SAE-SMO-SPLADE experiments.
+%% This file intentionally contains both write-up text and TODO placeholders so
+%% future runs can be dropped into the tables without rethinking the structure.
+\documentclass[
+% twocolumn,
+% hf,
+]{ceurart}
+
+\sloppy
+
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{multirow}
+\lstset{breaklines=true,basicstyle=\ttfamily\small}
+
+\begin{document}
+
+\copyrightyear{2026}
+\copyrightclause{Copyright for this paper by its authors.
+  Use permitted under Creative Commons License Attribution 4.0
+  International (CC BY 4.0).}
+
+\conference{TODO: Workshop / venue name, TODO date, TODO location}
+
+\title{Lightweight Query Encoders for Frozen Sparse Document Models}
+
+\author[1]{TODO Author One}[%
+email=todo@example.com,
+]
+\author[1]{TODO Author Two}[%
+email=todo@example.com,
+]
+\address[1]{TODO Affiliation}
+
+\begin{abstract}
+Learned sparse retrievers such as SPLADE provide strong lexical matching by
+expanding queries and documents into a shared vocabulary space, but standard
+usage applies the same relatively expensive encoder to both queries and
+documents. This work studies an asymmetric alternative: keep a strong document
+encoder frozen and offline, while training a cheaper query encoder whose sparse
+vectors remain directly dot-product compatible with the document index. We
+report a sequence of model-surgery experiments: vocabulary transplant between
+different masked-language-model vocabularies, shallow query encoders obtained by
+truncating a full SPLADE document model, ALBERT-style factorization of the
+shared embedding/MLM-head matrix, and extensions to Lion-SP-1B. The most stable
+SPLADE-v3 result uses a 3-layer spaced query body with an SVD-initialized
+factorized lexical head kept frozen during training; on full MS MARCO dev it
+achieves NDCG@10 0.4438 and MRR@10 0.3787, compared with 0.4657 and 0.3989 for
+the full SPLADE-v3 doc-only ceiling. This keeps about 95\% of the symmetric
+retrieval quality while substantially reducing query-side parameters. The
+ablation suite shows that cross-vocabulary vocabulary transplant can work, but
+its embedding initialization is load-bearing; random initialization, frozen
+document heads without transplant, and shared-vocabulary BERT baselines do not
+match the transplanted model. We also document failure modes: cross-encoder
+MarginMSE distillation can produce good retrieval while yielding unstable sparse
+support, and Lion-scale tokenizers make cross-vocabulary transfer especially
+fragile. The paper is a draft template; TODO rows mark active and future
+experiments.
+\end{abstract}
+
+\begin{keywords}
+  sparse retrieval \sep
+  SPLADE \sep
+  asymmetric retrieval \sep
+  model compression \sep
+  vocabulary transfer \sep
+  knowledge distillation
+\end{keywords}
+
+\maketitle
+
+\section{Paper Plan}
+
+This section is a working plan for finishing the paper. It can be removed or
+moved to a private notes file before submission.
+
+\paragraph{Primary story.}
+The cleanest story is not that every experiment succeeded. The main story is
+that dot-product-compatible asymmetric sparse retrieval is feasible, but the
+route matters. Cross-vocabulary transplant is possible and instructive, yet
+brittle. The strongest practical path is to start from the same document model,
+truncate the query body, and compress the lexical matrix while preserving the
+document vocabulary.
+
+\paragraph{Recommended contribution framing.}
+\begin{enumerate}
+  \item Define the asymmetric sparse retrieval setting: frozen expensive
+  document encoder, cheap query encoder, same sparse vocabulary, no projection
+  at retrieval time.
+  \item Present two families of query-side model surgery:
+  cross-vocabulary transplant and same-checkpoint shallow truncation.
+  \item Show that transplant initialization quality is the binding constraint
+  in cross-vocabulary runs.
+  \item Show that factorized shallow SPLADE preserves most of the full
+  SPLADE-v3 MS MARCO quality.
+  \item Document negative results as engineering and scientific evidence:
+  random embeddings, frozen document heads, shared-vocabulary BERT, and
+  cross-encoder MarginMSE are not reliable replacements for the stable recipe.
+\end{enumerate}
+
+\paragraph{Experiments still needed before submission.}
+\begin{enumerate}
+  \item Full MS MARCO dev for the best Lion query checkpoint. This requires a
+  Lion-specific 128K-vocabulary document index.
+  \item Repeat the best SPLADE-v3 factorized result with the corrected
+  optimizer-step learning-rate schedule, since gradient accumulation currently
+  makes cosine decay much slower than intended in Lion runs.
+  \item Add latency and parameter-count tables for all reported checkpoints.
+  \item Add a seed or repeatability check for the strongest NanoBEIR-only
+  claims, or clearly mark them as exploratory.
+  \item Decide whether the paper title should emphasize ``model surgery'',
+  ``asymmetric sparse retrieval'', or ``query-side compression''.
+\end{enumerate}
+
+\section{Introduction}
+
+Neural sparse retrievers bridge lexical retrieval and neural semantic matching
+by producing high-dimensional sparse vectors in a fixed vocabulary space.
+SPLADE-style models \cite{Formal2021SPLADE,Formal2022SPLADEv2} use masked
+language-model logits and max pooling to expand text into weighted lexical
+features. This makes retrieval compatible with inverted indexes while achieving
+strong ranking performance.
+
+However, standard SPLADE deployment uses the same encoder for queries and
+documents. Document encoding can be performed offline, but query encoding
+remains an online cost. The serving problem becomes sharper for stronger sparse
+document models, including SPLADE-v3 \cite{Lassance2024SPLADEv3} and recent
+LLM-based sparse retrievers such as Lion-SP. The core question of this work is:
+can we keep the strong document encoder fixed and train a much cheaper query
+encoder that emits vectors in the same sparse space?
+
+This setting has a strict compatibility requirement. If the query and document
+encoders do not share the same output vocabulary, their sparse vectors cannot be
+directly dot-producted. We therefore study methods that preserve or create a
+shared sparse vocabulary:
+
+\begin{itemize}
+  \item \textbf{Vocabulary transplant}: move the document encoder's tokenizer
+  and lexical matrix onto a smaller query backbone using token-level embedding
+  interpolation.
+  \item \textbf{Shallow same-checkpoint query encoders}: initialize the query
+  model from the document model, keep the same tokenizer and lexical head, and
+  remove most transformer layers.
+  \item \textbf{Factorized lexical matrices}: reduce the parameter floor caused
+  by the tied input embedding and MLM head using an ALBERT-style low-rank
+  factorization \cite{Lan2020ALBERT}.
+\end{itemize}
+
+The empirical arc is important. The first transplant approach revealed that
+embedding initialization is crucial: correct vocabulary size alone is not
+enough. The later shallow-query approach avoids that brittleness by construction
+and currently gives the strongest practical result.
+
+\section{Background and Related Work}
+
+\subsection{Learned Sparse Retrieval}
+
+SPLADE \cite{Formal2021SPLADE,Formal2022SPLADEv2} represents text by applying a
+sparse transformation to masked-language-model logits. Given token-level logits
+$z_{t,v}$ for token position $t$ and vocabulary term $v$, a typical SPLADE
+encoding is:
+\begin{equation}
+  s_v(x) = \log(1 + \max_t \operatorname{ReLU}(z_{t,v})).
+\end{equation}
+This produces non-negative sparse lexical vectors that can be indexed with
+inverted-index infrastructure. SPLADE-v3 \cite{Lassance2024SPLADEv3} improves
+training and distillation recipes for SPLADE models.
+
+Other learned sparse retrieval systems include TILDE/TILDEv2
+\cite{Zhuang2021TILDE}, uniCOIL \cite{Lin2021UniCOIL}, DeepImpact
+\cite{Mallia2021DeepImpact}, and lexical bottleneck systems such as LexMAE
+\cite{Shen2023LexMAE}. These methods share the goal of producing efficient
+retrieval-time representations, but our focus is specifically asymmetric
+query-side compression while keeping a strong frozen document encoder fixed.
+
+\subsection{Late Interaction and Distillation}
+
+ColBERT and ColBERTv2 \cite{Santhanam2022ColBERTv2} show that high-quality
+retrieval can be achieved by separating query and document representations and
+using efficient late interaction. SPLADE training recipes also rely heavily on
+distillation from cross-encoders and rerankers. We attempted a traditional
+MarginMSE-style cross-encoder distillation route, but found it under-constrained
+for the asymmetric sparse setting: margins can be matched by many different
+query-vector supports.
+
+\subsection{Vocabulary and Embedding Transfer}
+
+Vocabulary mismatch is a central obstacle in cross-model sparse retrieval.
+WECHSEL \cite{Minixhofer2022WECHSEL} and related vocabulary-transfer methods
+show that careful embedding initialization can transfer language models across
+tokenizers. Our vocabulary-transplant experiments use the same broad idea:
+shared tokens are copied directly, while donor-only tokens are initialized by
+nearest-neighbor interpolation from shared-token geometry. This is not enough
+for all backbones, but it is far better than random initialization.
+
+\subsection{Embedding Factorization}
+
+ALBERT \cite{Lan2020ALBERT} reduces parameters by factorizing the vocabulary
+embedding matrix into a smaller lexical embedding and an up-projection to hidden
+size. Our factorized SPLADE query models adapt this idea to a tied
+input/output lexical matrix. The query encoder maps token ids through
+$A \in \mathbb{R}^{|V| \times r}$ and $B \in \mathbb{R}^{r \times h}$, and the
+output head maps hidden states back through $B^\top A^\top$. This preserves the
+same output vocabulary while reducing the lexical parameter floor.
+
+\section{Problem Setup}
+
+Let $D_\theta$ be a strong frozen document encoder and $Q_\phi$ a cheaper query
+encoder. Both must output sparse vectors in the same vocabulary:
+\begin{equation}
+  D_\theta(d), Q_\phi(q) \in \mathbb{R}^{|V|}_{\ge 0}.
+\end{equation}
+Documents are encoded offline and stored in a sparse index. At retrieval time,
+the query encoder produces $Q_\phi(q)$ and documents are ranked by dot product:
+\begin{equation}
+  \operatorname{score}(q,d) = Q_\phi(q)^\top D_\theta(d).
+\end{equation}
+
+The objective is to reduce query-side compute and parameter count while
+preserving the retrieval quality of a symmetric or doc-only ceiling in which
+the strong document model is also used to encode queries.
+
+\section{Methods}
+
+\subsection{Vocabulary Transplant}
+
+The vocabulary-transplant approach starts with a small query masked-language
+model and a stronger SPLADE document model with a different tokenizer. The goal
+is to replace the query model's vocabulary with the document model's vocabulary
+without adding a projection layer.
+
+For each donor vocabulary token $v$:
+\begin{enumerate}
+  \item If $v$ exists in both vocabularies, copy the corresponding query-model
+  embedding.
+  \item Otherwise, find the $k$ nearest shared tokens to $v$ in the donor
+  embedding space.
+  \item Interpolate the query embeddings of those shared neighbors using
+  inverse-distance weights.
+  \item Resize the query embedding and output head so the model emits logits in
+  the donor vocabulary.
+\end{enumerate}
+
+In code, the interpolation is:
+\begin{equation}
+  e_Q(v) = \sum_{i \in \mathcal{N}_k(v)}
+  \frac{(1 - \cos(e_D(v), e_D(i)) + \epsilon)^{-1}}
+       {\sum_j (1 - \cos(e_D(v), e_D(j)) + \epsilon)^{-1}}
+  e_Q(i).
+\end{equation}
+
+This procedure makes the transplanted query model dot-product compatible with
+the frozen document index. The experiments show that this initialization is
+load-bearing: random embeddings with the correct vocabulary size fail.
+
+\subsection{Shallow Same-Checkpoint Query Encoders}
+
+The more stable approach avoids cross-vocabulary transfer. We load the same
+checkpoint for both query and document encoders, then remove most query-side
+transformer layers while keeping the tokenizer, embedding table, and output
+head. For SPLADE-v3, this gives a shallow BERT/SPLADE query encoder in the same
+30,522-dimensional vocabulary as the full document encoder. For Lion-SP-1B, the
+same idea gives a shallow Llama-style query encoder in a 128,256-dimensional
+vocabulary.
+
+Training uses a two-phase schedule:
+\begin{enumerate}
+  \item \textbf{Warmup}: freeze embeddings and the lexical head; train only the
+  retained body layers.
+  \item \textbf{Fine-tuning}: either keep the lexical factors/head frozen, or
+  unfreeze them with a much smaller learning rate.
+\end{enumerate}
+
+This schedule was necessary in practice. Immediately training the lexical
+matrix can destabilize sparse support; freezing the lexical basis lets the body
+learn how to drive the original SPLADE vocabulary first.
+
+\subsection{Factorized Lexical Head}
+
+For BERT-sized SPLADE, the tied lexical matrix has
+$30{,}522 \times 768 \approx 23.4$M parameters. For Lion-SP-1B, the tied Llama
+lexical matrix has $128{,}256 \times 2048 \approx 262.7$M parameters. Removing
+transformer layers therefore does not fully solve query-side parameter cost.
+
+We replace the tied lexical matrix $W \in \mathbb{R}^{|V| \times h}$ with two
+factors:
+\begin{equation}
+  W \approx A B,\quad A \in \mathbb{R}^{|V| \times r},\quad
+  B \in \mathbb{R}^{r \times h}.
+\end{equation}
+The input embedding path uses $A B$, while the output head uses $B^\top A^\top$.
+The factors are initialized with SVD from the original lexical matrix. The most
+stable SPLADE-v3 factorized run keeps these factors frozen throughout training.
+
+\subsection{Losses}
+
+The main shallow-alignment loss matches the full document model's SPLADE query
+vector:
+\begin{equation}
+  \mathcal{L}_{\mathrm{vec}} =
+  \frac{1}{B}\sum_{i=1}^B \|Q_\phi(q_i) - D_\theta(q_i)\|_2^2.
+\end{equation}
+We use a straight-through estimator through ReLU so gradients are not completely
+blocked by sparse thresholding early in training.
+
+Sparsity is encouraged with query L1 mass:
+\begin{equation}
+  \mathcal{L}_{q} = \lambda_q \frac{1}{B}\sum_i \|Q_\phi(q_i)\|_1.
+\end{equation}
+
+The non-factorized SPLADE shallow run can also use a contrastive term over
+Tevatron positives and hard negatives:
+\begin{equation}
+  \mathcal{L}_{\mathrm{ce}} =
+  -\log
+  \frac{\exp(Q_\phi(q_i)^\top D_\theta(d_i^+) / \tau)}
+       {\sum_{j=1}^{n}\exp(Q_\phi(q_i)^\top D_\theta(d_{ij}) / \tau)}.
+\end{equation}
+This is expensive because it requires frozen document encodes during training,
+so the strongest factorized SPLADE-v3 run disables it for cheaper iteration.
+
+\section{Experimental Setup}
+
+\subsection{Datasets and Metrics}
+
+Training uses MS MARCO passage data \cite{Bajaj2016MSMARCO} through Tevatron
+query-positive-hard-negative triples. Fast development uses NanoBEIR-style small
+evaluation subsets of MS MARCO and NFCorpus. Full evaluation uses MS MARCO dev
+with approximately 6,980 queries and the 8.8M-passage corpus. We report NDCG@10
+and MRR@10.
+
+NanoBEIR numbers are useful for iteration but noisy because each dataset has
+about 50 queries. Full MS MARCO numbers should be treated as the main evidence
+when available.
+
+\subsection{Model Families}
+
+\begin{table}[t]
+\caption{Main model families studied in this draft. ``Status'' is intentionally
+pragmatic: it describes whether the method is currently worth using.}
+\label{tab:model-families}
+\centering
+\begin{tabular}{p{0.26\linewidth}p{0.48\linewidth}p{0.16\linewidth}}
+\toprule
+Family & Description & Status \\
+\midrule
+SAE-SPLADE & Top-$k$ sparse autoencoder over a small backbone, then SPLADE
+fine-tuning. & Baseline \\
+Vocabulary transplant & Small query backbone resized to document vocabulary
+with kNN embedding interpolation. & Instructive, brittle \\
+Projected query & Small backbone projected into frozen SPLADE head. & Negative \\
+Direct shared-vocab BERT & BERT-family query model already sharing
+SPLADE-v3 vocabulary. & Negative \\
+Shallow SPLADE & Same checkpoint as doc model, but fewer query layers. & Stable \\
+Factorized shallow SPLADE & Shallow SPLADE plus ALBERT-style lexical factors. & Strongest SPLADE-v3 result \\
+Lion variants & Same ideas with Lion-SP-1B and 128K vocabulary. & Active \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}
+
+\subsection{Full MS MARCO Results}
+
+\begin{table}[t]
+\caption{Full MS MARCO dev results with 8.8M-passage indexes. These are the
+strongest completed full-index results so far.}
+\label{tab:full-msmarco}
+\centering
+\begin{tabular}{lrrp{0.35\linewidth}}
+\toprule
+Configuration & NDCG@10 & MRR@10 & Notes \\
+\midrule
+\texttt{naver/splade-v3} doc-only ceiling
+  & 0.4657 & 0.3989 & Full SPLADE-v3 encodes queries and documents. \\
+\texttt{splade\_shallow\_factorized\_spaced\_align}
+  & 0.4438 & 0.3787 & 3-layer query body from layers [0, 6, 11]; frozen SVD lexical factors/head. \\
+\texttt{lion\_shallow\_factorized\_align}
+  & TODO & TODO & Requires Lion 128K-vocabulary full MS MARCO index. \\
+\texttt{lion\_shallow\_factorized\_spaced\_align}
+  & TODO & TODO & Active/future full-index eval after best checkpoint is chosen. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The factorized spaced SPLADE-v3 query keeps approximately 95.3\% of the
+SPLADE-v3 doc-only NDCG@10 and 94.9\% of its MRR@10. The absolute gaps are
+0.0219 NDCG@10 and 0.0202 MRR@10.
+
+\subsection{NanoBEIR Development Results}
+
+\begin{table}[t]
+\caption{Representative NanoBEIR development results. These numbers are useful
+for comparing recipes during iteration, but should not be treated as final
+claims without full MS MARCO evaluation or repeat runs.}
+\label{tab:nanobeir}
+\centering
+\begin{tabular}{lrrp{0.38\linewidth}}
+\toprule
+Configuration & NanoMSMARCO & NanoNFCorpus & Notes \\
+\midrule
+SPLADE-v3 doc-doc ceiling & $\sim$0.64--0.65 & TODO & Full model on both sides. \\
+\texttt{vocab\_transplant\_align} & $\sim$0.61 & TODO & Ettin-17M/68M to SPLADE-v3 vocab; alignment-only. \\
+\texttt{splade\_shallow\_align} & $\sim$0.65 & TODO & Stable non-factorized shallow SPLADE. \\
+\texttt{splade\_shallow\_align\_distill} & $\sim$0.65 & $\sim$0.31 & Good retrieval, unstable nnz/FLOPs. \\
+\texttt{splade\_shallow\_factorized\_spaced\_align} & $\sim$0.693 & $\sim$0.333 & Strongest SPLADE-v3 factorized NanoBEIR run. \\
+Lion-SP-1B doc-doc ceiling & 0.6510 & 0.3480 & Lion model on both sides. \\
+\texttt{lion\_transplant\_align} & 0.6410 & 0.3211 & Ettin-150M transplanted to Lion 128K vocabulary. \\
+\texttt{lion\_shallow\_factorized\_align}, 5 contiguous layers & 0.63--0.65 & 0.26--0.29 & Several runs; sensitive to factor dim and schedule. \\
+\texttt{lion\_shallow\_factorized\_spaced\_align}, 5 spaced layers & TODO & TODO & Active run; fill with best checkpoint. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablations and Negative Results}
+
+\begin{table}[t]
+\caption{Ablations that clarify what is and is not responsible for success.}
+\label{tab:ablations}
+\centering
+\begin{tabular}{p{0.25\linewidth}p{0.30\linewidth}p{0.34\linewidth}}
+\toprule
+Ablation & Outcome & Interpretation \\
+\midrule
+Random embedding init with donor vocabulary & Fails to match vocab transplant & Correct output dimensionality is not enough. \\
+Frozen document MLM head plus projection & Fails & A pretrained lexical head alone is insufficient. \\
+Shared-vocabulary BERT direct alignment & Underperforms & Sharing vocabulary without the right initialization/body is insufficient. \\
+Ettin-68M vs Ettin-17M & Similar behavior & Capacity was not the first bottleneck in transplant runs. \\
+More hard negatives ($n$-way 33) & No clear improvement & Ranking fine-tuning was not the binding constraint. \\
+Cross-encoder MarginMSE & Competitive NanoBEIR, unstable nnz & Margins do not uniquely constrain sparse support. \\
+Unfreezing factorized SPLADE lexical factors & Works but weaker & Moving the compressed lexical basis is risky. \\
+Keeping factorized SPLADE head frozen & Strongest factorized result & Adapt the body, preserve the SVD lexical basis. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion}
+
+\subsection{Why Vocabulary Transplant Works, and Why It Breaks}
+
+The transplant experiments show that sparse retrieval compatibility is not just
+about output dimensionality. The embedding table is the interface between the
+query backbone and the document vocabulary. Tokensurgeon-style kNN
+interpolation gives the backbone a usable starting geometry; random
+initialization does not.
+
+The Lion transplant runs make the limitation clearer. Llama-3 tokenization uses
+a large BPE vocabulary, while many BERT-family backbones use WordPiece. Exact
+string overlap can be single-digit percent, so most donor tokens must be
+interpolated. For robust modern backbones this can still work, but for
+bert-base the transplanted embedding table appears too out-of-distribution: the
+model can learn unigram-level masked language modeling, but does not recover
+context-sensitive behavior quickly enough.
+
+\subsection{Why Shallow Same-Checkpoint Models Are More Stable}
+
+Shallow same-checkpoint models sidestep the vocabulary-transfer problem. Query
+and document vectors are compatible by construction because they share the
+tokenizer and lexical head. The remaining question is how much transformer depth
+the query side needs.
+
+The SPLADE-v3 factorized spaced result suggests that a query encoder does not
+need a contiguous prefix of layers. A 3-layer body using one early, one middle,
+and one final layer performed better than the contiguous factorized variants.
+This motivates ongoing Lion experiments with 5 spaced layers.
+
+\subsection{Sparse Support Stability}
+
+Several runs achieved decent retrieval while producing undesirable sparse
+support dynamics. This matters because sparse retrieval efficiency depends on
+the number and mass of active dimensions, not just ranking metrics. The
+cross-encoder MarginMSE experiment is the clearest example: score differences
+can be matched with many query-vector shapes, so the model can vary nnz and mass
+without being punished by the margin objective. Future losses should anchor
+support or lexical mass directly if they use cross-encoder scores.
+
+\subsection{Current Lion Status}
+
+Lion-SP-1B has a much larger lexical matrix than SPLADE-v3. The full merged
+model has approximately 1.236B parameters, and the tied lexical matrix alone is
+approximately 262.7M parameters. Factorization is therefore not optional if the
+goal is a query model in the 25--30\% parameter range. With
+factorized dimension 256, a 5-layer Lion query model is roughly 337M
+parameters, about 27\% of the full model. Increasing the factorization dimension
+to 384 did not materially improve results in the current runs, so layer
+selection is the more promising next axis.
+
+\section{Future Experiment Template}
+
+\begin{table}[t]
+\caption{Template for upcoming experiments. Fill this table as new runs finish.}
+\label{tab:future}
+\centering
+\begin{tabular}{p{0.25\linewidth}p{0.25\linewidth}p{0.18\linewidth}p{0.20\linewidth}}
+\toprule
+Experiment & Hypothesis & Expected metric & Result / decision \\
+\midrule
+Correct LR scheduler for gradient accumulation & Current cosine decay is too slow when scheduler steps only on optimizer updates. & Better late-stage NanoBEIR and full MS MARCO. & TODO \\
+Lion 5 spaced layers [0,3,6,10,-1] & Later Lion layers help lexical/semantic alignment more than first-5 contiguous layers. & NanoMSMARCO $>$ contiguous 5-layer run. & Active; fill after 50k. \\
+Lion full MS MARCO eval & NanoBEIR improvements transfer to full corpus. & NDCG@10, MRR@10. & TODO; requires Lion index. \\
+SPLADE-v3 factorized repeat with fixed scheduler & Confirm best factorized result under corrected schedule. & NDCG@10 around or above 0.4438. & TODO \\
+Cross-encoder MarginMSE with vector anchor & Stabilize nnz while using reranker margins. & Similar NDCG with lower nnz variance. & TODO \\
+BPE-aware transplant & Improve Lion transplant for BERT/RoBERTa backbones. & Better MLM warmup and NanoBEIR. & TODO \\
+Latency benchmark & Measure query-time savings directly. & ms/query and params. & TODO \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Threats to Validity}
+
+First, many results are from NanoBEIR development subsets. These are useful for
+debugging but have high variance. Claims should rely on full MS MARCO dev
+whenever possible.
+
+Second, some training recipes changed during exploration. In particular, the
+interaction between gradient accumulation and cosine learning-rate schedules
+must be standardized before final claims.
+
+Third, the strongest full result is currently for SPLADE-v3. Lion results are
+promising but need full-index evaluation.
+
+Fourth, parameter count is not the same as latency. The final paper should
+include actual query encoding latency on at least one GPU and one CPU setting.
+
+\section{Conclusion}
+
+We studied how to train cheap query encoders for frozen sparse document models.
+Vocabulary transplant showed that cross-vocabulary asymmetric SPLADE is
+possible, but also revealed that embedding initialization quality is
+load-bearing. Same-checkpoint shallow query encoders are more stable because
+they preserve the sparse vocabulary by construction. The strongest completed
+result combines shallow layer selection with ALBERT-style lexical factorization:
+a 3-layer factorized SPLADE-v3 query encoder retains about 95\% of full
+SPLADE-v3 MS MARCO dev quality. Current Lion experiments extend the same idea
+to a larger 128K-vocabulary sparse document model; the main open question is
+whether spaced layer selection and corrected training schedules can produce a
+similarly strong full-corpus result.
+
+\begin{thebibliography}{99}
+
+\bibitem{Formal2021SPLADE}
+T. Formal, B. Piwowarski, and S. Clinchant.
+\newblock SPLADE: Sparse Lexical and Expansion Model for First Stage Ranking.
+\newblock In \emph{SIGIR}, 2021.
+
+\bibitem{Formal2022SPLADEv2}
+T. Formal, C. Lassance, B. Piwowarski, and S. Clinchant.
+\newblock From Distillation to Hard Negative Sampling: Making Sparse Neural IR Models More Effective.
+\newblock In \emph{SIGIR}, 2022.
+
+\bibitem{Lassance2024SPLADEv3}
+C. Lassance, H. Dejean, T. Formal, and S. Clinchant.
+\newblock SPLADE-v3: New baselines for SPLADE.
+\newblock arXiv preprint, 2024.
+
+\bibitem{Zeng2025Lion}
+H. Zeng et al.
+\newblock Scaling Sparse and Dense Retrieval in Decoder-Only LLMs.
+\newblock TODO: verify final venue/version and complete author list. Model card:
+\texttt{hzeng/Lion-SP-1B-llama3-marco-mntp}.
+
+\bibitem{Lan2020ALBERT}
+Z. Lan, M. Chen, S. Goodman, K. Gimpel, P. Sharma, and R. Soricut.
+\newblock ALBERT: A Lite BERT for Self-supervised Learning of Language Representations.
+\newblock In \emph{ICLR}, 2020.
+
+\bibitem{Minixhofer2022WECHSEL}
+B. Minixhofer, F. Paischer, and N. Rekabsaz.
+\newblock WECHSEL: Effective initialization of subword embeddings for cross-lingual transfer of monolingual language models.
+\newblock In \emph{NAACL}, 2022.
+
+\bibitem{Bajaj2016MSMARCO}
+P. Bajaj, D. Campos, N. Craswell, L. Deng, J. Gao, X. Liu, R. Majumder,
+A. McNamara, B. Mitra, T. Nguyen, M. Rosenberg, X. Song, A. Stoica,
+S. Tiwary, and T. Wang.
+\newblock MS MARCO: A Human Generated MAchine Reading COmprehension Dataset.
+\newblock arXiv:1611.09268, 2016.
+
+\bibitem{Thakur2021BEIR}
+N. Thakur, N. Reimers, A. Ruckl\'e, A. Srivastava, and I. Gurevych.
+\newblock BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation of Information Retrieval Models.
+\newblock In \emph{NeurIPS Datasets and Benchmarks}, 2021.
+
+\bibitem{Santhanam2022ColBERTv2}
+K. Santhanam, O. Khattab, J. Saad-Falcon, C. Potts, and M. Zaharia.
+\newblock ColBERTv2: Efficient and Effective Retrieval via Lightweight Late Interaction.
+\newblock In \emph{NAACL}, 2022.
+
+\bibitem{Zhuang2021TILDE}
+S. Zhuang and G. Zuccon.
+\newblock TILDE: Term Independent Likelihood moDEl for Passage Re-ranking.
+\newblock In \emph{SIGIR}, 2021.
+
+\bibitem{Lin2021UniCOIL}
+J. Lin and X. Ma.
+\newblock A Few Brief Notes on DeepImpact, COIL, and a Conceptual Framework for Information Retrieval Techniques.
+\newblock arXiv:2106.14807, 2021.
+
+\bibitem{Mallia2021DeepImpact}
+A. Mallia, O. Khattab, T. Suel, and N. Tonellotto.
+\newblock Learning Passage Impacts for Inverted Indexes.
+\newblock In \emph{SIGIR}, 2021.
+
+\bibitem{Shen2023LexMAE}
+T. Shen et al.
+\newblock LexMAE: Lexicon-Bottlenecked Pretraining for Large-Scale Retrieval.
+\newblock In \emph{ICLR}, 2023.
+
+\end{thebibliography}
+
+\end{document}
