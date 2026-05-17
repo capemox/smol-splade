@@ -372,7 +372,11 @@ def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
     "lion_shallow_factorized_spaced_align",
     "lion_shallow_factorized_spaced5_align",
     "lion_shallow_factorized_late_align",
-    "lion_shallow_factorized_late_h768_align"
+    "lion_shallow_factorized_late_h768_align",
+    "lion_shallow_factorized_late_h768_kl_align",
+    "lion_shallow_factorized_late_h768_kl_hlr_align",
+    "lion_shallow_factorized_late_h768_truekl_hlr_align",
+    "lion_shallow_factorized_late_h768_truekl_align",
 ):
         from model import ShallowFactorizedLionQuery
         hf_id = sc["lion_hf_id"]
@@ -418,6 +422,10 @@ def main():
             "lion_shallow_factorized_spaced5_align",
             "lion_shallow_factorized_late_align",
             "lion_shallow_factorized_late_h768_align",
+            "lion_shallow_factorized_late_h768_kl_align",
+            "lion_shallow_factorized_late_h768_kl_hlr_align",
+            "lion_shallow_factorized_late_h768_truekl_hlr_align",
+            "lion_shallow_factorized_late_h768_truekl_align",
         ],
         help="Model type to evaluate (selects config section and model class)",
     )
@@ -475,6 +483,10 @@ def main():
         "lion_shallow_factorized_spaced5_align",
         "lion_shallow_factorized_late_align",
         "lion_shallow_factorized_late_h768_align",
+        "lion_shallow_factorized_late_h768_kl_align",
+        "lion_shallow_factorized_late_h768_kl_hlr_align",
+        "lion_shallow_factorized_late_h768_truekl_hlr_align",
+        "lion_shallow_factorized_late_h768_truekl_align",
     ):
         sc = cfg[args.stage]
         query_max_length = sc["query_max_length"]

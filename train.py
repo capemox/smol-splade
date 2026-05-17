@@ -3343,6 +3343,19 @@ def train_lion_shallow_align(
 
         with torch.no_grad():
             t_q_vecs = lion_doc.encode(q_texts, sc["query_max_length"]).float()
+            align_kind = sc.get("align_loss_kind", "mse")
+
+            if align_kind == "cos_kl":
+                t_q_logits = lion_doc.encode_logits(q_texts, sc["query_max_length"]).float()
+
+            if align_kind == "true_kl" or do_log:
+                enc_bs = sc.get("eval_batch_size", 8)
+                p_vecs = torch.cat([
+                    lion_doc.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
+                    for i in range(0, len(p_texts), enc_bs)
+                ], dim=0)
+                p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+                t_scores = (t_q_vecs.unsqueeze(1) * p_vecs_3d).sum(-1)
             if do_log:
                 enc_bs = sc.get("eval_batch_size", 8)
                 p_vecs = torch.cat([
@@ -3364,8 +3377,33 @@ def train_lion_shallow_align(
             q_relu = q_logits + (F.relu(q_logits) - q_logits).detach()
             q_vecs = torch.log1p(q_relu)
 
-            rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
-            align_loss = rank_loss
+            align_loss_kind = sc.get("align_loss_kind", "mse")
+            if align_loss_kind == "mse":
+                rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+                align_loss = rank_loss
+            elif align_loss_kind == "cos_kl":
+                cos_loss = (1.0 - F.cosine_similarity(q_vecs, t_q_vecs.to(q_vecs.dtype))).mean()
+                T = float(sc.get("kd_temperature", 4.0))
+                kl_coeff = float(sc.get("kl_coeff", 1.0))
+                kl_loss = F.kl_div(
+                    F.log_softmax(q_logits / T, dim=-1),
+                    F.softmax(t_q_logits / T, dim=-1),
+                    reduction="batchmean",
+                ) * T ** 2
+                align_loss = cos_loss + kl_coeff * kl_loss
+            elif align_loss_kind == "true_kl":
+                cos_loss = (1.0 - F.cosine_similarity(q_vecs, t_q_vecs.to(q_vecs.dtype))).mean()
+                T = float(sc.get("kd_temperature", 1.0))   # T=1.0 for true_kl (only 8 candidates, sharp ranking)
+                kl_coeff = float(sc.get("kl_coeff", 1.0))
+                s_scores = (q_vecs.unsqueeze(1) * p_vecs_3d.to(q_vecs.dtype)).sum(-1)
+                kl_loss = F.kl_div(
+                    F.log_softmax(s_scores / T, dim=-1),
+                    F.softmax(t_scores / T, dim=-1),
+                    reduction="batchmean",
+                ) * T ** 2
+                align_loss = cos_loss + kl_coeff * kl_loss
+            else:
+                raise ValueError(f"Unknown align_loss_kind: {align_loss_kind}")
             if lambda_q > 0.0:
                 lq_scale = min(1.0, step / lambda_q_warmup_steps) if lambda_q_warmup_steps > 0 else 1.0
                 align_loss = align_loss + lq_scale * lambda_q * q_vecs.sum(-1).mean()
@@ -3468,6 +3506,35 @@ def train_lion_shallow_factorized_late_h768_align(cfg: dict, resume: str | None 
         factorized=True,
     )
 
+def train_lion_shallow_factorized_late_h768_kl_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg, resume=resume,
+        section="lion_shallow_factorized_late_h768_kl_align",
+        factorized=True,
+    )
+
+
+def train_lion_shallow_factorized_late_h768_kl_hlr_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg, resume=resume,
+        section="lion_shallow_factorized_late_h768_kl_hlr_align",
+        factorized=True,
+    )
+
+def train_lion_shallow_factorized_late_h768_truekl_hlr_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg, resume=resume,
+        section="lion_shallow_factorized_late_h768_truekl_hlr_align",
+        factorized=True,
+    )
+
+def train_lion_shallow_factorized_late_h768_truekl_align(cfg: dict, resume: str | None = None):
+    return train_lion_shallow_align(
+        cfg, resume=resume,
+        section="lion_shallow_factorized_late_h768_truekl_align",
+        factorized=True,
+    )
+
 def main():
     parser = argparse.ArgumentParser(description="Train SAE-SPLADE with ettin-17m")
     parser.add_argument(
@@ -3484,6 +3551,10 @@ def main():
             "lion_shallow_factorized_spaced5_align",
             "lion_shallow_factorized_late_align",
             "lion_shallow_factorized_late_h768_align",
+            "lion_shallow_factorized_late_h768_kl_align",
+            "lion_shallow_factorized_late_h768_kl_hlr_align",
+            "lion_shallow_factorized_late_h768_truekl_hlr_align",
+            "lion_shallow_factorized_late_h768_truekl_align",
         ],
         help="Training stage to run.",
     )
@@ -3534,6 +3605,14 @@ def main():
         train_lion_shallow_factorized_late_align(cfg, resume=args.resume)
     elif args.stage == "lion_shallow_factorized_late_h768_align":
         train_lion_shallow_factorized_late_h768_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_late_h768_kl_align":
+        train_lion_shallow_factorized_late_h768_kl_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_late_h768_kl_hlr_align":
+        train_lion_shallow_factorized_late_h768_kl_hlr_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_late_h768_truekl_align":
+        train_lion_shallow_factorized_late_h768_truekl_align(cfg, resume=args.resume)
+    elif args.stage == "lion_shallow_factorized_late_h768_truekl_hlr_align":
+        train_lion_shallow_factorized_late_h768_truekl_hlr_align(cfg, resume=args.resume)
     else:
         train_vocab_transplant(cfg, resume=args.resume)
 
