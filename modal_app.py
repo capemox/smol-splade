@@ -380,6 +380,20 @@ def ettin_splade_smoke():
     ])
     volume.commit()
 
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_SHORT,
+)
+@with_notifications(lambda a, kw: f"eval_ettin_checkpoints[{kw.get('tag','?')}]")
+def eval_ettin_checkpoints(model_size: str = "150m", tag: str = "B_higher_reg_fast"):
+    """Eval all saved checkpoints from an Ettin SPLADE training run."""
+    base_dir = f"{VOLUME_MOUNT}/ettin_splade/ettin-encoder-{model_size}__{tag}"
+    _run(["scripts/eval_ettin_checkpoints.py", "--base_dir", base_dir])
+    volume.commit()
+
 
 @app.function(
     image=image,
