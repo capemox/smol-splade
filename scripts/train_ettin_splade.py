@@ -83,6 +83,7 @@ def main():
             model_name=f"{args.model_id.split('/')[-1]}-splade-msmarco",
         ),
     )
+    model.max_seq_length = 192
 
     # 2. MS MARCO triplets.
     logging.info("Loading MS MARCO triplet-hard data")
@@ -120,9 +121,9 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
-        fp16=True,
-        bf16=False,
-        gradient_checkpointing=args.gradient_checkpointing,
+        fp16=False,
+        bf16=True,
+        gradient_checkpointing=False,
         batch_sampler=BatchSamplers.NO_DUPLICATES,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
