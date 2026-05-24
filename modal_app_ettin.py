@@ -488,6 +488,46 @@ def train_ettin_splade_1b(
     ])
     volume.commit()
 
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_LONG,
+    retries=modal.Retries(max_retries=3, initial_delay=0.0),
+)
+@with_notifications(
+    lambda a, kw: f"train_ettin_splade_distill[{kw.get('model_size','150m')}/{kw.get('tag','default')}]"
+)
+def train_ettin_splade_distill(
+    model_size: str = "150m",
+    tag: str = "default",
+    max_steps: int = 30_000,
+    batch_size: int = 64,
+    query_reg: float = 5e-5,
+    doc_reg: float = 3e-5,
+    dataset_id: str = "sentence-transformers/msmarco-msmarco-MiniLM-L6-v3",
+    dataset_config: str = "",
+):
+    """SPLADE-v3 style distillation training with MarginMSE on teacher scores."""
+    if model_size not in ("150m", "400m"):
+        raise ValueError(f"150m or 400m only. Got: {model_size}")
+    model_id = ETTIN_PRESETS[model_size][0]
+    output_dir = f"{VOLUME_MOUNT}/ettin_splade/ettin-encoder-{model_size}__{tag}"
+    cmd = [
+        "scripts/train_ettin_splade_distill.py",
+        "--model_id", model_id,
+        "--output_dir", output_dir,
+        "--max_steps", str(max_steps),
+        "--batch_size", str(batch_size),
+        "--query_reg_weight", str(query_reg),
+        "--doc_reg_weight", str(doc_reg),
+        "--dataset_id", dataset_id,
+    ]
+    if dataset_config:
+        cmd += ["--dataset_config", dataset_config]
+    _run(cmd)
+    volume.commit()
 
 # ── Default entrypoint ───────────────────────────────────────────────────────
 
