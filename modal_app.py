@@ -10,24 +10,39 @@ ONE-TIME SETUP (from the repo root, after `pip install modal` and `modal setup`)
 
     modal volume create --version=2 sae-smo-splade-vol
     modal secret create huggingface-token HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxx
-    modal secret create telegram-bot \
+    modal secret create alerts \
         TELEGRAM_BOT_TOKEN=123456:ABC-DEF... \
         TELEGRAM_CHAT_ID=987654321
     modal run modal_app.py::setup_workspace
 
-USAGE — baseline (lion_shallow_factorized_align):
+USAGE — Lion factorized stages (baseline + variants from earlier experiments):
 
-    modal run --detach modal_app.py::train_lion
-    modal run --detach modal_app.py::eval_lion
-    modal run --detach modal_app.py::eval_lion_ceiling
+    modal run --detach modal_app.py::train_stage --stage lion_shallow_factorized_align
+    modal run --detach modal_app.py::eval_stage --stage lion_shallow_factorized_align \\
+        --checkpoint checkpoints_lion_shallow/lion_shallow_factorized_align/align_final.pt
+    modal run --detach modal_app.py::eval_stage_ceiling --stage lion_shallow_factorized_align
 
-USAGE — any other stage (after adding it to config.yaml + train.py + eval_msmarco.py):
+USAGE — Ettin SPLADE training (encoder doc-encoder, for downstream factorization):
 
-    modal run --detach modal_app.py::train_stage --stage lion_shallow_factorized_spaced5_align
-    modal run --detach modal_app.py::eval_stage \\
-        --stage lion_shallow_factorized_spaced5_align \\
-        --checkpoint checkpoints_lion_shallow/lion_shallow_factorized_spaced5_align/align_final.pt
-    modal run --detach modal_app.py::eval_stage_ceiling --stage lion_shallow_factorized_spaced5_align
+    # Smoke test the pipeline (~10 min, ~$0.30):
+    modal run --detach modal_app.py::ettin_splade_smoke
+
+    # 150M hyperparameter sweep (~4h, ~$8 each):
+    modal run --detach modal_app.py::train_ettin_splade --tag A_baseline
+    modal run --detach modal_app.py::train_ettin_splade --tag B_higher_reg \\
+        --query-reg 5e-4 --doc-reg 3e-4
+    modal run --detach modal_app.py::train_ettin_splade --tag C_longer \\
+        --max-steps 60000
+    modal run --detach modal_app.py::train_ettin_splade --tag D_higher_lr \\
+        --learning-rate 5e-5
+    modal run --detach modal_app.py::train_ettin_splade --tag E_best \\
+        --query-reg 5e-4 --doc-reg 3e-4 --max-steps 60000  # adapt to actual winners
+
+    # Once 150M recipe is validated, scale up:
+    modal run --detach modal_app.py::train_ettin_splade --model-size 400m \\
+        --query-reg <winner> --doc-reg <winner> --max-steps <winner>
+    modal run --detach modal_app.py::train_ettin_splade --model-size 1b \\
+        --query-reg <winner> --doc-reg <winner> --max-steps <winner>
 
 Tail logs at any time (works from any machine):
 
@@ -47,7 +62,6 @@ VOLUME_NAME = "sae-smo-splade-vol"
 HF_SECRET_NAME = "huggingface-token"
 TELEGRAM_SECRET_NAME = "alerts"
 
-# Paths inside the running container:
 REPO_SRC = "/repo"
 VOLUME_MOUNT = "/vol"
 WORK_DIR = f"{VOLUME_MOUNT}/work/sae-smo-splade"
@@ -58,6 +72,14 @@ GPU_TYPE = "L40S"
 HOUR = 60 * 60
 TIMEOUT_LONG = 24 * HOUR
 TIMEOUT_SHORT = 30 * 60
+
+# Map size → (HF model id, GPU type, default batch, default grad_accum).
+# Defaults chosen so each model fits comfortably with effective batch ≈ 32.
+ETTIN_PRESETS = {
+    "150m": ("jhu-clsp/ettin-encoder-150m", "L40S",     32, 1),
+    "400m": ("jhu-clsp/ettin-encoder-400m", "L40S",     16, 2),
+    "1b":   ("jhu-clsp/ettin-encoder-1b",   "A100-80GB", 16, 2),
+}
 
 # ── Modal app, image, volume, secrets ────────────────────────────────────────
 
@@ -128,8 +150,7 @@ def notify(message: str) -> None:
 
 def with_notifications(job_label):
     """Decorator: ping Telegram on start, success, and failure.
-    job_label can be a string or a callable(fn_args, fn_kwargs) -> string for
-    dynamic labels (e.g. including the stage name being trained)."""
+    job_label can be a string or a callable(fn_args, fn_kwargs) -> string."""
     import functools
     import time
     import traceback
@@ -198,11 +219,7 @@ def setup_workspace():
 
 # ── Notification self-test ───────────────────────────────────────────────────
 
-@app.function(
-    image=image,
-    secrets=[telegram_secret],
-    timeout=60,
-)
+@app.function(image=image, secrets=[telegram_secret], timeout=60)
 def notify_test():
     notify("🔔 Test ping from Modal — telegram-bot secret is wired up correctly.")
 
@@ -247,7 +264,7 @@ def index_smoke():
     volume.commit()
 
 
-# ── Index build (one-time) ───────────────────────────────────────────────────
+# ── Lion index build (already done; kept for completeness) ───────────────────
 
 @app.function(
     image=image,
@@ -271,70 +288,7 @@ def build_lion_index():
     volume.commit()
 
 
-# ── Baseline (kept for backward compatibility) ───────────────────────────────
-
-@app.function(
-    image=image,
-    gpu=GPU_TYPE,
-    volumes={VOLUME_MOUNT: volume},
-    secrets=[hf_secret, telegram_secret],
-    timeout=TIMEOUT_LONG,
-    retries=modal.Retries(max_retries=3, initial_delay=0.0),
-)
-@with_notifications("train_lion")
-def train_lion():
-    _run(["train.py", "lion_shallow_factorized_align", "--config", "config.yaml"])
-    volume.commit()
-
-
-@app.function(
-    image=image,
-    gpu=GPU_TYPE,
-    volumes={VOLUME_MOUNT: volume},
-    secrets=[hf_secret, telegram_secret],
-    timeout=6 * HOUR,
-)
-@with_notifications("eval_lion")
-def eval_lion(
-    checkpoint: str = "checkpoints_lion_shallow/lion_shallow_factorized_align/align_final.pt",
-):
-    _run([
-        "scripts/eval_msmarco.py",
-        "--stage", "lion_shallow_factorized_align",
-        "--checkpoint", checkpoint,
-        "--config", "config.yaml",
-        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
-        "--encode_batch_size", "8",
-        "--query_batch_size", "128",
-        "--densify_chunk", "1024",
-    ])
-    volume.commit()
-
-
-@app.function(
-    image=image,
-    gpu=GPU_TYPE,
-    volumes={VOLUME_MOUNT: volume},
-    secrets=[hf_secret, telegram_secret],
-    timeout=6 * HOUR,
-)
-@with_notifications("eval_lion_ceiling")
-def eval_lion_ceiling():
-    """Teacher-as-query ceiling for the baseline stage."""
-    _run([
-        "scripts/eval_msmarco.py",
-        "--stage", "lion_shallow_factorized_align",
-        "--doc_only",
-        "--config", "config.yaml",
-        "--index_dir", f"{VOLUME_MOUNT}/indexes/msmarco_lion_index",
-        "--encode_batch_size", "8",
-        "--query_batch_size", "128",
-        "--densify_chunk", "1024",
-    ])
-    volume.commit()
-
-
-# ── Parameterized stage runners (for experiments) ────────────────────────────
+# ── Lion-derived stage runners (parameterized) ───────────────────────────────
 
 @app.function(
     image=image,
@@ -346,8 +300,8 @@ def eval_lion_ceiling():
 )
 @with_notifications(lambda a, kw: f"train_stage[{kw.get('stage', a[0] if a else '?')}]")
 def train_stage(stage: str = "lion_shallow_factorized_align"):
-    """Train any stage by name. Stage must be defined in config.yaml AND in
-    train.py's choices list + elif routing."""
+    """Train any Lion-derived stage by name. Stage must be defined in
+    config.yaml AND in train.py's choices list + elif routing."""
     _run(["train.py", stage, "--config", "config.yaml"])
     volume.commit()
 
@@ -361,8 +315,7 @@ def train_stage(stage: str = "lion_shallow_factorized_align"):
 )
 @with_notifications(lambda a, kw: f"eval_stage[{kw.get('stage', a[0] if a else '?')}]")
 def eval_stage(stage: str, checkpoint: str):
-    """Eval any stage against the prebuilt Lion index. Lion-derived stages all
-    share the same index since they share the same teacher doc encoder."""
+    """Eval any Lion-derived stage against the prebuilt Lion MS MARCO index."""
     _run([
         "scripts/eval_msmarco.py",
         "--stage", stage,
@@ -385,7 +338,7 @@ def eval_stage(stage: str, checkpoint: str):
 )
 @with_notifications(lambda a, kw: f"eval_stage_ceiling[{kw.get('stage', a[0] if a else '?')}]")
 def eval_stage_ceiling(stage: str):
-    """Teacher-as-query ceiling for the given stage (--doc_only)."""
+    """Teacher-as-query ceiling for any Lion-derived stage."""
     _run([
         "scripts/eval_msmarco.py",
         "--stage", stage,
@@ -399,6 +352,143 @@ def eval_stage_ceiling(stage: str):
     volume.commit()
 
 
+# ── Ettin SPLADE — pipeline smoke + parameterized full trainer ───────────────
+
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,   # 150M smoke runs fine on L40S
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_SHORT,
+)
+@with_notifications("ettin_splade_smoke")
+def ettin_splade_smoke():
+    """500-step smoke on Ettin-150M with MS MARCO triplets. ~10 min, ~$0.30.
+    Validates that sentence-transformers + Ettin + Modal all work end-to-end
+    before launching any longer run."""
+    _run([
+        "scripts/train_ettin_splade.py",
+        "--model_id", "jhu-clsp/ettin-encoder-150m",
+        "--output_dir", f"{VOLUME_MOUNT}/ettin_splade/smoke",
+        "--max_steps", "500",
+        "--batch_size", "16",
+        "--gradient_accumulation_steps", "1",
+        "--save_steps", "500",
+        "--eval_steps", "500",
+        "--logging_steps", "50",
+        "--dataset_size", "20000",
+    ])
+    volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,   # L40S — handles 150m and 400m. Use train_ettin_splade_1b for 1B.
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_LONG,
+    retries=modal.Retries(max_retries=3, initial_delay=0.0),
+)
+@with_notifications(
+    lambda a, kw: f"train_ettin_splade[{kw.get('model_size','150m')}/{kw.get('tag','default')}]"
+)
+def train_ettin_splade(
+    model_size: str = "150m",     # "150m" or "400m" — for 1B use train_ettin_splade_1b
+    tag: str = "default",         # appended to output_dir so concurrent runs don't collide
+    max_steps: int = 30_000,
+    batch_size: int = 0,          # 0 = use preset default for this model size
+    grad_accum: int = 0,          # 0 = use preset default for this model size
+    learning_rate: float = 2e-5,
+    warmup_ratio: float = 0.05,
+    query_reg: float = 5e-5,
+    doc_reg: float = 3e-5,
+    save_steps: int = 5_000,
+    eval_steps: int = 5_000,
+    logging_steps: int = 200,
+    dataset_size: int = 500_000,
+):
+    """Train Ettin 150M or 400M as SPLADE with MS MARCO triplets, on L40S.
+    Defaults match the Ettin model-card recipe; override flags to sweep.
+    For 1B (which needs A100-80GB) call train_ettin_splade_1b instead."""
+    if model_size not in ("150m", "400m"):
+        raise ValueError(
+            f"train_ettin_splade supports 150m or 400m (on L40S). "
+            f"For 1b use train_ettin_splade_1b. Got: {model_size}"
+        )
+    model_id, _gpu, default_batch, default_accum = ETTIN_PRESETS[model_size]
+
+    if batch_size == 0:
+        batch_size = default_batch
+    if grad_accum == 0:
+        grad_accum = default_accum
+
+    output_dir = f"{VOLUME_MOUNT}/ettin_splade/ettin-encoder-{model_size}__{tag}"
+    _run([
+        "scripts/train_ettin_splade.py",
+        "--model_id", model_id,
+        "--output_dir", output_dir,
+        "--max_steps", str(max_steps),
+        "--batch_size", str(batch_size),
+        "--gradient_accumulation_steps", str(grad_accum),
+        "--learning_rate", str(learning_rate),
+        "--warmup_ratio", str(warmup_ratio),
+        "--query_reg_weight", str(query_reg),
+        "--doc_reg_weight", str(doc_reg),
+        "--save_steps", str(save_steps),
+        "--eval_steps", str(eval_steps),
+        "--logging_steps", str(logging_steps),
+        "--dataset_size", str(dataset_size),
+    ])
+    volume.commit()
+
+
+# Variant with A100-80GB GPU specifically for 1B. Modal pins the GPU at
+# function definition time, so we need a separate function for the 1B GPU.
+@app.function(
+    image=image,
+    gpu="A100-80GB",
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_LONG,
+    retries=modal.Retries(max_retries=3, initial_delay=0.0),
+)
+@with_notifications(lambda a, kw: f"train_ettin_splade_1b[{kw.get('tag','default')}]")
+def train_ettin_splade_1b(
+    tag: str = "default",
+    max_steps: int = 30_000,
+    batch_size: int = 16,
+    grad_accum: int = 2,
+    learning_rate: float = 2e-5,
+    warmup_ratio: float = 0.05,
+    query_reg: float = 5e-5,
+    doc_reg: float = 3e-5,
+    save_steps: int = 5_000,
+    eval_steps: int = 5_000,
+    logging_steps: int = 200,
+    dataset_size: int = 500_000,
+):
+    """Same recipe as train_ettin_splade but pinned to A100-80GB for the 1B
+    model. Use after you've settled hyperparameters on 150M."""
+    output_dir = f"{VOLUME_MOUNT}/ettin_splade/ettin-encoder-1b__{tag}"
+    _run([
+        "scripts/train_ettin_splade.py",
+        "--model_id", "jhu-clsp/ettin-encoder-1b",
+        "--output_dir", output_dir,
+        "--max_steps", str(max_steps),
+        "--batch_size", str(batch_size),
+        "--gradient_accumulation_steps", str(grad_accum),
+        "--learning_rate", str(learning_rate),
+        "--warmup_ratio", str(warmup_ratio),
+        "--query_reg_weight", str(query_reg),
+        "--doc_reg_weight", str(doc_reg),
+        "--save_steps", str(save_steps),
+        "--eval_steps", str(eval_steps),
+        "--logging_steps", str(logging_steps),
+        "--dataset_size", str(dataset_size),
+    ])
+    volume.commit()
+
+
 # ── Default entrypoint ───────────────────────────────────────────────────────
 
 @app.local_entrypoint()
@@ -406,6 +496,6 @@ def main():
     """Default entrypoint runs setup_workspace. For everything else, invoke
     functions explicitly, e.g.:
 
-        modal run --detach modal_app.py::train_stage --stage lion_shallow_factorized_spaced5_align
+        modal run --detach modal_app.py::train_ettin_splade --model-size 150m --tag A_baseline
     """
     setup_workspace.remote()
