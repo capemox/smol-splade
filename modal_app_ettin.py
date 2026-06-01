@@ -179,11 +179,11 @@ def with_notifications(job_label):
 
 
 def _run(cmd: list) -> None:
-    import os
-    import subprocess
+    import os, subprocess
     env = {**os.environ, **RUNTIME_ENV}
-    print(f"+ uv run {' '.join(cmd)}", flush=True)
-    subprocess.run(["uv", "run", *cmd], cwd=WORK_DIR, env=env, check=True)
+    venv_py = f"{WORK_DIR}/.venv/bin/python"
+    print(f"+ {venv_py} {' '.join(cmd)}", flush=True)
+    subprocess.run([venv_py, *cmd], cwd=WORK_DIR, env=env, check=True)
 
 
 # ── Workspace setup ──────────────────────────────────────────────────────────
@@ -528,6 +528,67 @@ def train_ettin_splade_distill(
         cmd += ["--dataset_config", dataset_config]
     _run(cmd)
     volume.commit()
+
+@app.function(
+    image=image,
+    gpu=GPU_TYPE,   # L40S fine for 68M + frozen 110M teacher
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=TIMEOUT_LONG,
+    retries=modal.Retries(max_retries=3, initial_delay=0.0),
+)
+@with_notifications(lambda a, kw: f"train_expanded_splade[{kw.get('tag','default')}]")
+def train_expanded_splade(
+    tag: str = "ettin68m_to_spladev3",
+    ettin_id: str = "jhu-clsp/ettin-encoder-68m",
+    max_steps: int = 30000,
+    batch_size: int = 24,
+):
+    out = f"{VOLUME_MOUNT}/expanded_splade/{tag}"
+    _run([
+        "scripts/train_expanded_splade.py",
+        "--ettin_id", ettin_id,
+        "--doc_splade_id", "naver/splade-v3",
+        "--output_dir", out,
+        "--max_steps", str(max_steps),
+        "--batch_size", str(batch_size),
+    ])
+    volume.commit()
+
+@app.function(
+    image=image,
+    gpu="L40S",
+    volumes={VOLUME_MOUNT: volume},
+    secrets=[hf_secret, telegram_secret],
+    timeout=60 * 60 * 10,   # up to 10h; safetensors quirk + 8.8M docs
+)
+@with_notifications(lambda a, kw: "build_spladev3_index")
+def build_spladev3_index(batch_size: int = 64, shard_size: int = 50000, limit: int = 0):
+    """Build the full MS MARCO sparse index in naver/splade-v3's 30522-dim space."""
+    index_dir = f"{VOLUME_MOUNT}/indexes/msmarco_spladev3_index"
+    cmd = [
+        "scripts/build_msmarco_index.py",
+        "--config", "config.yaml",
+        "--stage", "vocab_transplant",          # <-- was --section
+        "--index_dir", index_dir,
+        "--batch_size", str(batch_size),
+        "--shard_size", str(shard_size),
+    ]
+    if limit:
+        cmd += ["--limit", str(limit)]
+    _run(cmd)
+    volume.commit()
+
+@app.function(image=image, volumes={VOLUME_MOUNT: volume}, timeout=600)
+def sync_code():
+    import subprocess
+    subprocess.run([
+        "rsync", "-a", "--exclude=.git", "--exclude=.venv",
+        "--exclude=__pycache__", "--exclude=checkpoints_*", "--exclude=data",
+        f"{REPO_SRC}/", f"{WORK_DIR}/",
+    ], check=True)
+    volume.commit()
+    print("✓ code synced", flush=True)
 
 # ── Default entrypoint ───────────────────────────────────────────────────────
 
