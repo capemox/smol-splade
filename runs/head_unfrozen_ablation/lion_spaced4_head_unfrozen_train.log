@@ -1,0 +1,74 @@
+Device: cuda
+[lion-shallow] lion=hzeng/Lion-SP-1B-llama3-marco-mntp | n_layers=4 | freeze_warmup=5000 | alignment=50000 | lr=0.0002 | head_lr_scale=0.1 | nway=8 | lambda_q=0.001 | grad_accum=32 | freeze_head_after_warmup=False | gradient_checkpointing=True
+[lion-shallow] Loading frozen Lion doc encoder …
+[FrozenLionSPLADE] Loading hzeng/Lion-SP-1B-llama3-marco-mntp …
+[FrozenLionSPLADE] Base model: meta-llama/Llama-3.2-1B
+
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]
+Loading weights:  76%|███████▌  | 111/146 [00:00<00:00, 1073.63it/s]
+Loading weights: 100%|██████████| 146/146 [00:00<00:00, 1170.29it/s]
+[lion-shallow] Building 4-layer shallow Lion query encoder …
+[lion-shallow] Using explicit Lion layer indices for query body: [0, 5, 10, 15]
+[ShallowLionQuery] Base: meta-llama/Llama-3.2-1B
+
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 146/146 [00:00<00:00, 13120.68it/s]
+/home/capemox/projects/sae-smo-splade/train.py:3308: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = GradScaler(enabled=False)
+[lion-shallow] Enabled gradient checkpointing.
+[lion-shallow] Query model: 506.0M params (4/16 layers kept).
+[lion-shallow] Phase 0 (frozen warmup). Trainable: 243.3M / 506.0M
+[lion-shallow] Initial eval …
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (doc_doc ceiling) …
+  [NanoMSMARCO] NDCG@10  doc_doc (ceiling) : 0.6510
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.0000
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (doc_doc ceiling) …
+  [NanoNFCorpus] NDCG@10  doc_doc (ceiling) : 0.3480
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.0220
+[lion-shallow] Training loop (50000 steps remaining) …
+[lion-shallow/warm] step    200 | loss 37.0553 (rank 37.053 ctr 0.000) | q_nnz 1129.0 (teacher 234.0) | flops 64.5 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 18s
+[lion-shallow/warm] step    400 | loss 29.6464 (rank 29.643 ctr 0.000) | q_nnz 1021.0 (teacher 287.0) | flops 48.6 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step    600 | loss 26.6056 (rank 26.600 ctr 0.000) | q_nnz 1120.0 (teacher 234.0) | flops 46.5 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step    800 | loss 32.3528 (rank 32.345 ctr 0.000) | q_nnz 1246.0 (teacher 339.0) | flops 50.8 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   1000 | loss 24.4026 (rank 24.393 ctr 0.000) | q_nnz 1528.0 (teacher 195.0) | flops 50.3 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   1200 | loss 24.2487 (rank 24.235 ctr 0.000) | q_nnz 1664.0 (teacher 277.0) | flops 56.9 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   1400 | loss 21.4991 (rank 21.491 ctr 0.000) | q_nnz 1101.0 (teacher 178.0) | flops 28.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   1600 | loss 26.7426 (rank 26.730 ctr 0.000) | q_nnz 1495.0 (teacher 206.0) | flops 40.2 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   1800 | loss 24.3347 (rank 24.325 ctr 0.000) | q_nnz 1058.0 (teacher 245.0) | flops 27.8 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   2000 | loss 21.0888 (rank 21.085 ctr 0.000) | q_nnz 479.0 (teacher 187.0) | flops 10.6 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   2200 | loss 16.6487 (rank 16.645 ctr 0.000) | q_nnz 352.0 (teacher 262.0) | flops 8.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   2400 | loss 26.7537 (rank 26.706 ctr 0.000) | q_nnz 2202.0 (teacher 213.0) | flops 100.1 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   2600 | loss 26.0172 (rank 26.011 ctr 0.000) | q_nnz 369.0 (teacher 307.0) | flops 12.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   2800 | loss 30.8759 (rank 30.840 ctr 0.000) | q_nnz 1351.0 (teacher 283.0) | flops 64.7 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   3000 | loss 20.2120 (rank 20.202 ctr 0.000) | q_nnz 427.0 (teacher 170.0) | flops 17.0 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   3200 | loss 18.5517 (rank 18.535 ctr 0.000) | q_nnz 634.0 (teacher 301.0) | flops 26.1 | p@1 s=0.00 t=0.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   3400 | loss 23.4422 (rank 23.420 ctr 0.000) | q_nnz 545.0 (teacher 211.0) | flops 32.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   3600 | loss 24.7177 (rank 24.700 ctr 0.000) | q_nnz 488.0 (teacher 276.0) | flops 24.8 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   3800 | loss 20.3424 (rank 20.330 ctr 0.000) | q_nnz 169.0 (teacher 248.0) | flops 16.3 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   4000 | loss 23.0760 (rank 23.050 ctr 0.000) | q_nnz 337.0 (teacher 263.0) | flops 32.1 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   4200 | loss 27.9614 (rank 27.942 ctr 0.000) | q_nnz 164.0 (teacher 245.0) | flops 23.1 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   4400 | loss 36.0635 (rank 36.042 ctr 0.000) | q_nnz 154.0 (teacher 327.0) | flops 23.8 | p@1 s=0.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   4600 | loss 29.7976 (rank 29.770 ctr 0.000) | q_nnz 162.0 (teacher 253.0) | flops 29.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   4800 | loss 25.0173 (rank 24.985 ctr 0.000) | q_nnz 144.0 (teacher 152.0) | flops 33.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow/warm] step   5000 | loss 29.6372 (rank 29.616 ctr 0.000) | q_nnz 113.0 (teacher 280.0) | flops 21.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 7s
+[lion-shallow] Step 5000: switched to Phase 1 (body_lr=2.00e-04 head_lr=2.00e-05 head_params=262.7M).
+Traceback (most recent call last):
+  File "/home/capemox/projects/sae-smo-splade/train.py", line 3587, in <module>
+    main()
+  File "/home/capemox/projects/sae-smo-splade/train.py", line 3583, in main
+    train_lion_shallow_align(cfg, resume=args.resume)
+  File "/home/capemox/projects/sae-smo-splade/train.py", line 3426, in train_lion_shallow_align
+    scaler.scale(align_loss / grad_accum).backward()
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/torch/_tensor.py", line 631, in backward
+    torch.autograd.backward(
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/torch/autograd/__init__.py", line 381, in backward
+    _engine_run_backward(
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/torch/autograd/graph.py", line 869, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 502.00 MiB. GPU 0 has a total capacity of 7.62 GiB of which 381.12 MiB is free. Including non-PyTorch memory, this process has 7.23 GiB memory in use. Of the allocated memory 7.07 GiB is allocated by PyTorch, and 20.65 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

@@ -1,589 +1,31 @@
-# ── Model ────────────────────────────────────────────────────────────────────
-model:
-  # HuggingFace model ID for the backbone encoder
-  hf_id: "jhu-clsp/ettin-encoder-17m"
-
-  # SAE dictionary size (latent vocabulary). Scale relative to backbone hidden_size;
-  # 65536 ≈ 85× for a 768-dim model. Reduce if memory is tight.
-  sae_width: 30522  # matches naver/splade-v3 vocab; restore to 65536 after asymmetric SAE pretraining
-
-  # Top-k activations kept per token during SAE encoding
-  k: 32
-
-  # Auxiliary k for dead-neuron recovery (usually 2×k)
-  aux_k: 64
-
-  # Neuron is considered dead after this many tokens have passed without activation
-  dead_steps_threshold: 10_000_000
-
-  # Normalise backbone embeddings before SAE (centres + unit-scale).
-  # Requires an init run over ~8k docs to compute stats (auto if True).
-  normalize_input: true
-
-
-# ── SAE pretraining ───────────────────────────────────────────────────────────
-sae:
-  # HF corpus dataset (each record should have a "text" or "passage" field).
-  # Tevatron/msmarco-passage-corpus streams MS MARCO without downloading it all.
-  corpus_dataset: "Tevatron/msmarco-passage-corpus"
-  corpus_text_field: "text"        # field name containing the passage text
-
-  doc_max_length: 128              # token length for documents
-  batch_size: 16                   # documents per step
-  lr: 5.0e-5
-  warmup_steps: 10_000
-  max_steps: 160_000
-  weight_decay: 0.01
-  fp16: true
-  freeze_backbone: true            # only train SAE weights
-
-  rcst_coeff: 1.0                  # reconstruction loss weight
-  aux_coeff: 0.5                   # auxiliary (dead-neuron) loss weight
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "sae_asymmetric"
-
-
-# ── SPLADE finetuning ─────────────────────────────────────────────────────────
-splade:
-  # Checkpoint produced by the SAE pretraining stage
-  sae_checkpoint: "sae_asymmetric/sae_final.pt"
-
-  # --- Training data (choose one) ---
-  #
-  # Option A (default): Tevatron hard-negative pairs – no extra download needed.
-  #   Set distil_data_path to "" to use this.
-  train_dataset: "Tevatron/msmarco-passage"   # has query + pos + hard-neg texts
-  train_text_field: "query"
-
-  # Option B: ColBERTv2 distillation file with teacher scores.
-  #   Download: wget https://huggingface.co/colbert-ir/colbertv2.0_msmarco_64way/resolve/main/examples.json
-  #   Set distil_data_path to the local file path; set corpus_dataset above too.
-  distil_data_path: "data/colbertv2_msmarco_64way.json"
-  queries_dataset: "Tevatron/msmarco-passage"  # only used with distil_data_path
-
-  nway: 4                          # positives + negatives per query
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-  lr: 2.0e-5
-  warmup_steps: 10_000
-  max_steps: 240_000
-  weight_decay: 0.01
-  fp16: true
-
-  # FLOPs regularisation coefficients (lambda_d * avg_doc_nnz + lambda_q * avg_qry_nnz)
-  lambda_d: 0.04
-  lambda_q: 0.06
-  flops_warmup_steps: 6_000        # ramp regularisation linearly from 0 over this many steps
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "splade"
-
-
-# ── Asymmetric finetuning ─────────────────────────────────────────────────────
-# Trains a lightweight SAE-SPLADE query encoder to work with a frozen doc SPLADE.
-# The doc encoder (e.g. naver/splade-v3) is never updated; only the query SAE is trained.
+# Shallow/pruned query-encoder experiments.
 #
-# IMPORTANT: the SAE for this stage must be pretrained with sae_width=30522
-# (the vocab size of naver/splade-v3, a DistilBERT-based model).
-# The regular SAE checkpoint uses sae_width=65536 and cannot be reused.
+# The query encoder is built by taking selected layers from the frozen document
+# encoder, then training that smaller query side to match the full document
+# encoder's sparse output space.
 #
-# Run SAE pretraining for asymmetric mode:
-#   uv run train.py sae --config config.yaml
-# but first temporarily set  model.sae_width: 30522  in this file,
-# then restore it after. The checkpoint will land in sae_asymmetric/ below.
-asymmetric:
+# Layer selection:
+# - Set n_layers to keep the first N layers.
+# - Or set layer_indices to choose exact zero-based layers. This covers first-N,
+#   last-N, spaced, and hand-picked layer selections. Negative indices are
+#   supported for Lion; use explicit positive indices for SPLADE.
+#
+# Factorization:
+# - Set factorize_embeddings: true to replace the tied lexical embedding/head
+#   matrix with a low-rank factorized version.
+
+splade_shallow:
   doc_splade_hf_id: "naver/splade-v3"
 
-  # SAE checkpoint pretrained with sae_width=30522 (matches naver/splade-v3 vocab)
-  sae_checkpoint: "sae_asymmetric/sae_final.pt"
-
-  # Training data — same options as SPLADE finetuning
-  distil_data_path: "data/colbertv2_msmarco_64way.json"
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  nway: 4
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-  lr: 2.0e-5
-  warmup_steps: 10_000
-  max_steps: 240_000
-  weight_decay: 0.01
-  fp16: true
-
-  lambda_q: 0.01                   # query FLOPs regularisation only (docs are frozen)
-  flops_warmup_steps: 40_000       # delay past k_anneal_steps so alignment happens before sparsification
-
-  # k-annealing: start dense so SAE latents can find alignment with doc vocab dims,
-  # then decay to model.k once overlap is established.
-  k_init: 256                      # starting k (high = denser overlap = usable gradients)
-  k_anneal_steps: 30_000           # steps to linearly decay k_init → model.k
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "asymmetric"
-
-
-# ── Projected query encoder ───────────────────────────────────────────────────
-# Trains a small backbone + linear projection + frozen MLM head from the doc SPLADE.
-# Both query and doc vectors are in the same vocabulary space → dot product is valid
-# regardless of which tokenizer the small backbone uses.
-#
-# Run: uv run train.py projected --config config.yaml
-projected:
-  # Small query backbone (can differ from model.hf_id)
-  query_hf_id: "jhu-clsp/ettin-encoder-68m"
-
-  # Frozen doc SPLADE — also donates its MLM head to the query encoder
-  doc_splade_hf_id: "naver/splade-v3"
-
-  # Phase 1: alignment warm-up
-  # Trains only the projection layer with MSE loss: query_output ≈ doc_splade_output
-  # on the same corpus texts. Set to 0 to skip (not recommended).
-  alignment_steps: 10_000
-  alignment_lr: 1.0e-3     # higher LR is fine — only the small projection is updated
-
-  # Training data (same options as splade/asymmetric)
-  distil_data_path: "data/colbertv2_msmarco_64way.json"
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  nway: 4
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-  lr: 2.0e-5
-  warmup_steps: 5_000
-  max_steps: 200_000
-  weight_decay: 0.01
-  fp16: true
-
-  lambda_q: 0.04
-  flops_warmup_steps: 10_000   # short ramp: projection already aligned, sparsity can kick in early
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "projected"
-
-
-# ── Vocab-transplant query encoder ───────────────────────────────────────────
-# Uses tokensurgeon-style embedding transfer to retarget a small MLM encoder
-# (e.g. ettin-17m) from its native vocabulary onto the doc SPLADE's vocabulary.
-# After transplant the query encoder shares the doc encoder's tokenizer and
-# vocabulary space, so their vectors can be dot-producted directly.
-#
-# The transplant is performed automatically at the start of training and cached
-# in transplant_dir; subsequent runs skip it if the directory already exists.
-#
-# The query model must support AutoModelForMaskedLM (i.e. have an MLM head).
-#
-# Run: uv run train.py vocab_transplant --config config.yaml
-vocab_transplant:
-  # Small query encoder — must be loadable as AutoModelForMaskedLM
-  query_hf_id: "jhu-clsp/ettin-encoder-17m"
-
-  # Frozen doc SPLADE — also donates its tokenizer to the query encoder
-  doc_splade_hf_id: "naver/splade-v3"
-
-  # Nearest-neighbour count for approximating donor-only tokens.
-  # Higher k → smoother interpolation; 64 is a good default.
-  tokensurgeon_k: 64
-
-  # Where to cache the transplanted model (skipped if already present)
-  transplant_dir: "transplanted_ettin"
-
-  # Training data (same options as splade/asymmetric/projected)
-  distil_data_path: "data/colbertv2_msmarco_64way.json"
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  nway: 4
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-  lr: 2.0e-5
-  warmup_steps: 10_000
-  max_steps: 200_000
-  weight_decay: 0.01
-  fp16: true
-
-  lambda_q: 0.05
-  flops_warmup_steps: 50_000   # long ramp: let retrieval quality establish before full sparsification
-  align_coeff: 0.3             # weight of cosine alignment term relative to CE ranking loss
-
-  # Phase 1: cosine alignment warmup
-  # Trains query encoder with cosine similarity loss against doc SPLADE on corpus texts.
-  # Bootstraps representation alignment before ranking fine-tuning begins.
-  alignment_steps: 50_000
-  alignment_lr: 5.0e-4  # cosine-decays to 1e-5 over alignment_steps
-
-  # LoRA on the frozen doc encoder (optional).
-  lora_doc_encoder: false
-  lora_r: 8
-  lora_alpha: 16
-  lora_dropout: 0.1
-  lora_warmup_steps: 10_000
-  lora_target_modules: ["query", "value"]   # BERT attention projections in naver/splade-v3
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "vocab_transplant"
-
-
-# ── Stage 5b: Vocab transplant — alignment-only ──────────────────────────────
-# Cosine-alignment-only variant of vocab_transplant. Skips ranking fine-tuning.
-# Train with: uv run train.py vocab_transplant_align --config config.yaml
-#
-# Independent of the `vocab_transplant` section above so it can evolve without
-# polluting the joint two-phase flow. Only the keys actually consumed by
-# train_vocab_transplant_align live here — no nway, lr, max_steps, lambda_q,
-# flops, lora, distillation data path, etc.
-vocab_transplant_align:
-  # Small query encoder — must be loadable as AutoModelForMaskedLM
-  query_hf_id: "jhu-clsp/ettin-encoder-17m"
-
-  # Frozen doc SPLADE — also donates its tokenizer to the query encoder
-  doc_splade_hf_id: "naver/splade-v3"
-
-  # Vocab-transplant artifacts (shared with `vocab_transplant`; the transplant
-  # is content-addressed by query × doc model and reused if already built).
-  tokensurgeon_k: 64
-  transplant_dir: "transplanted_ettin"
-
-  # Alignment data — query texts (not corpus passages); same loader as the
-  # Phase 1 alignment used by `vocab_transplant`.
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  # Tokenisation / batch
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-
-  # Optimiser
-  alignment_steps: 50_000
-  alignment_lr: 5.0e-4   # cosine-decays to 1e-5 over alignment_steps
-  weight_decay: 0.01
-  fp16: true
-
-  # Logging / checkpoints
-  log_every: 200
-  save_every: 10_000
-  output_dir: "vocab_transplant_align"   # separate from `vocab_transplant`
-
-
-# ── Stage 5c: Random-init alignment (tokensurgeon ablation) ──────────────────
-# Same architecture as vocab_transplant_align (ettin backbone + donor MLM head
-# in donor vocab space) but the embedding table is randomly initialized instead
-# of being seeded by tokensurgeon.  Run both stages and compare final NDCG@10
-# to determine whether tokensurgeon's kNN embedding transfer actually helps.
-#
-# Requires a KD warmup phase because random embeddings start with q_nnz ≈ 10k
-# (everything active) — cosine alignment from that state causes dead-dim
-# collapse identical to the bert-small issue.
-#
-# Run: uv run train.py random_init_align --config config.yaml
-random_init_align:
-  # Same small query encoder as vocab_transplant_align
-  query_hf_id: "jhu-clsp/ettin-encoder-17m"
-
-  # Frozen doc SPLADE — donates its tokenizer and vocab to the query encoder
-  doc_splade_hf_id: "naver/splade-v3"
-
-  # Cache dir for the randomly-initialized model (built once, reused on reruns)
-  init_cache_dir: "ettin_random_init"
-
-  # Alignment data
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  # Tokenisation / batch
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-
-  # KD warmup: must be > 0 for random init (prevents dead-dim collapse)
-  kd_warmup_steps: 10_000
-  kd_temperature: 4.0
-
-  # Cosine alignment
-  alignment_steps: 50_000
-  alignment_lr: 5.0e-4   # cosine-decays to 1e-5 over kd_warmup + alignment steps
-  weight_decay: 0.01
-  fp16: true
-
-  # Logging / checkpoints
-  log_every: 200
-  save_every: 10_000
-  output_dir: "random_init_align"
-
-
-# ── Stage 5d: Doc-head alignment ──────────────────────────────────────────────
-# Like random_init_align but borrows the doc SPLADE's MLM head instead of using
-# a random one.  A linear projection (backbone_hidden → splade_hidden) bridges
-# the dimension gap (e.g. 256 → 768 for ettin-17m ↔ splade-v3).
-#
-# The MLM head is frozen by default: only the backbone and projection are
-# trained.  This tests whether the pre-trained head's structure (which dims
-# activate, which don't) is enough to bootstrap alignment without tokensurgeon.
-#
-# Training: KD warmup → cosine alignment, same recipe as random_init_align.
-#
-# Run: uv run train.py doc_head_align --config config.yaml
-doc_head_align:
-  query_hf_id: "jhu-clsp/ettin-encoder-17m"
-  doc_splade_hf_id: "naver/splade-v3"
-
-  # Freeze the doc SPLADE's MLM head — only backbone + projection are trained.
-  # Set to false to allow the head to adapt (closer to the `projected` stage).
-  freeze_doc_head: true
-
-  # Alignment data
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  # Tokenisation / batch
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-
-  # KD warmup: initializes the projection before cosine alignment kicks in
-  kd_warmup_steps: 10_000
-  kd_temperature: 4.0
-
-  # Cosine alignment
-  alignment_steps: 50_000
-  alignment_lr: 5.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  # Logging / checkpoints
-  log_every: 200
-  save_every: 10_000
-  output_dir: "doc_head_align"
-
-
-# ── Stage 5e: Lion-SP-1B vocab transplant alignment ──────────────────────────
-# Vocab transplant + cosine alignment using Lion-SP-1B (1B bidirectional Llama-3)
-# as the frozen doc encoder instead of naver/splade-v3.  Tests whether
-# tokensurgeon scales to a larger, architecturally different donor with a very
-# different vocabulary (Llama-3 128K BPE vs ettin's 50K wordpiece).
-#
-# Llama-3 BPE shares very few exact tokens with BERT wordpiece, so most donor
-# positions are initialised by kNN interpolation.  A KD warmup phase is therefore
-# included before switching to cosine alignment.
-#
-# Run: uv run train.py lion_transplant_align --config config.yaml
-lion_transplant_align:
-  query_hf_id: "jhu-clsp/ettin-encoder-150m"
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-
-  # Transplant cache (built once, reused on reruns)
-  transplant_dir: "transplanted_ettin_lion"
-  tokensurgeon_k: 256
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 4   # effective batch = 16; smooths loss without extra GPU memory
-  eval_batch_size: 4   # Lion-SP-1B creates [B,128,128K] logits; keep small to avoid OOM
-
-  # KD warmup: critical when low-overlap transplant leaves most tokens approximate
-  kd_warmup_steps: 0
-  kd_temperature: 4.0
-
-  alignment_steps: 50_000
-  alignment_lr: 5.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  # FLOPs regularisation (squared-mean form: gradient ∝ activation).
-  # Lion's d_nnz on queries is ~250–350 per query (observed live during training
-  # via the d_nnz logging). Cosine alignment self-regularises q_nnz toward that
-  # target without much help; lambda_q just provides a soft anchor.
-  lambda_q: 0.001
-  flops_warmup_steps: 5_000
-
-  # Weight on the softmax-KL safety-net term (added to cosine alignment in the
-  # post-warmup phase). KL operates on raw logits and is independent of the
-  # relu in the SPLADE encoding. Set to 0 for pure cosine.
-  kl_coeff: 1.0
-
-  # MLM warmup phase before alignment. Re-trains body+head on standard
-  # masked-LM in the donor's vocabulary to fix head-body coherence after the
-  # transplant. ettin-150m doesn't need this (head-body coherence survived
-  # the swap). bert-base-uncased does — without it q_logits stay heavily
-  # negative through training and cosine alignment can't escape dead relu.
-  # Default 0 (off). Recommend 5000-10000 for bert-style backbones.
-  mlm_warmup_steps: 0
-  mlm_mask_rate: 0.15
-  # mlm_warmup_lr: 5.0e-4    # defaults to alignment_lr
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_transplant_align"
-
-
-# ── Stage 6: Direct alignment (no vocab transplant) ──────────────────────────
-# Cosine alignment against a frozen doc SPLADE for query encoders that already
-# share the doc SPLADE's tokenizer (vocab=30522, bert-base-uncased).
-# No tokensurgeon step — the model is loaded directly from HuggingFace.
-#
-# Use this to ablate whether the vocab transplant is necessary, and to compare
-# BERT-family baselines against the transplanted ettin-17m result.
-#
-# Comparable model sizes to ettin-17m (17M, H=256):
-#   bert-mini:   google/bert_uncased_L-4_H-256_A-4  (~11M, same H=256)
-#   bert-small:  google/bert_uncased_L-4_H-512_A-8  (~29M)
-#
-# Train with: uv run train.py direct_align --config config.yaml
-direct_align:
-  # Query encoder — must share vocab with doc_splade_hf_id (vocab_size=30522).
-  # Change this to swap between bert-mini, bert-small, etc.
-  query_hf_id: "google/bert_uncased_L-4_H-512_A-8"   # bert-small, ~29M
-
-  # Frozen doc SPLADE
-  doc_splade_hf_id: "naver/splade-v3"
-
-  # Alignment data — MS MARCO query texts
-  queries_dataset: "Tevatron/msmarco-passage"
-
-  # Tokenisation / batch
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 8
-
-  # KD warmup: train with temperature-scaled KL divergence over pre-relu logits
-  # before switching to cosine alignment. Provides gradient to all vocabulary
-  # dimensions from the start, preventing the dead-dim collapse that occurs when
-  # cold-starting a BERT model without tokensurgeon initialisation.
-  # Set kd_warmup_steps to 0 to skip.
-  kd_warmup_steps: 10_000
-  kd_temperature: 4.0    # higher = softer targets, more dims receive gradient
-
-  # Optimiser
-  alignment_steps: 50_000
-  alignment_lr: 5.0e-4   # cosine-decays to 1e-5 over alignment_steps
-  weight_decay: 0.01
-  fp16: true
-
-  # Logging / checkpoints
-  log_every: 200
-  save_every: 10_000
-  output_dir: "direct_align"
-
-
-# ── Stage 7: Shallow SPLADE alignment ────────────────────────────────────────
-# Query encoder = first n_layers of the doc SPLADE backbone (50% = 3 of 6 layers).
-# Shares tokenizer, embedding table, and MLM head with the frozen doc encoder —
-# no vocab transplant, no projection, no cross-architecture mismatch.
-#
-# Two-phase training:
-#   Phase 0 (freeze_warmup_steps): only the kept body layers train.
-#     Embeddings + MLM head stay frozen at doc-encoder values, giving the body
-#     a stable target before the input representations start moving too.
-#   Phase 1 (alignment_steps): embeddings and head unfreeze at a lower LR than
-#     the retained body layers, preserving the shared vocab space while allowing
-#     the lightweight query encoder to adapt.
-#
-# Loss: teacher-vector MSE + optional contrastive CE + query L1.
-# The MSE distills the full doc encoder's query SPLADE vector. The contrastive
-# term scores each student query against frozen teacher passage vectors from
-# the Tevatron positive + hard-negative set, so training also learns retrieval
-# margins rather than only matching the teacher query vector.
-#
-# Run: uv run train.py splade_shallow_align --config config.yaml
-splade_shallow_align:
-  doc_splade_hf_id: "naver/splade-v3"
-  n_layers: 3                  # 25% of BERT-base's 12 layers (splade-v3 is bert-base)
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 16
-  gradient_accumulation_steps: 2   # effective batch = 32
-  eval_batch_size: 32              # splade-v3 is small; 32 fits easily
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.1          # MLM head + embeddings LR as fraction of body LR at phase transition
-
-  # Phase 1: full alignment
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4            # cosine-decays to 1e-5 over alignment_steps
-  weight_decay: 0.01
-  fp16: true
-
-  # Distillation: teacher = frozen splade-v3, student = shallow model
-  nway: 8                         # 1 positive + 7 hard negatives per query (from Tevatron)
-  contrastive_coeff: 0.1           # CE over in-batch teacher passage vectors; 0 disables
-  contrastive_temperature: 1.0     # divide student query-passage dot products by this
-  lambda_q: 0.0001                # target L1 for sparsity; STE prevents dead-ReLU
-  lambda_q_warmup_steps: 5_000   # ramp lambda_q 0→target so model learns dims before pruning
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "splade_shallow_align"
-
-
-# ── Stage: Shallow SPLADE with ALBERT-style lexical factorization ────────────
-# Same stable recipe as splade_shallow_align, but replaces the tied
-# [vocab, hidden] input embedding / MLM decoder matrix with two tied factors:
-#   A: [vocab, factorized_embedding_dim]
-#   B: [factorized_embedding_dim, hidden]
-# The output head uses hidden -> B.T -> A.T, so the sparse output vocabulary
-# remains exactly the same while cutting the lexical parameter floor.
-#
-# Run: uv run train.py splade_shallow_factorized_align --config config.yaml
-splade_shallow_factorized_align:
-  doc_splade_hf_id: "naver/splade-v3"
+  # First-N example:
   n_layers: 3
-  factorized_embedding_dim: 128   # ALBERT-style bottleneck/rank for tied embedding + MLM head
-  factorization_init: "svd"       # initialise A/B from the full SPLADE-v3 tied matrix
+  # Spaced example for a 12-layer SPLADE model:
+  # layer_indices: [0, 6, 11]
 
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 16
-  gradient_accumulation_steps: 2   # effective batch = 32; matches the stable shallow recipe
-  eval_batch_size: 32
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.01             # factorized lexical factors are sensitive after unfreeze
-  freeze_head_after_warmup: false  # unfreeze after warmup; contrastive remains off for isolation
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  use_contrastive: false          # try the cheaper pre-contrastive shallow recipe first
-  log_ranking_metrics: false      # avoids frozen passage encoding on log steps when contrastive is off
-  contrastive_coeff: 0.1
-  contrastive_temperature: 1.0
-  lambda_q: 0.0002                # slightly stronger than shallow_align; factorized head tends to drift denser
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "splade_shallow_factorized_align"
-
-
-# ── Stage: Factorized shallow SPLADE with spaced doc layers ──────────────────
-# Same as splade_shallow_factorized_align, but the 3-layer query body is composed
-# from doc layers [0, 6, 11] rather than the first three contiguous layers.
-# Uses frozen factorized embedding / SPLADE head throughout and no contrastive
-# passage loss, matching the strongest factorized-head finding so far.
-#
-# Run: uv run train.py splade_shallow_factorized_spaced_align --config config.yaml
-splade_shallow_factorized_spaced_align:
-  doc_splade_hf_id: "naver/splade-v3"
-  n_layers: 3
-  layer_indices: [0, 6, 11]       # first, 7th, and last layer from BERT-base SPLADE-v3
+  factorize_embeddings: false
   factorized_embedding_dim: 256
-  factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
+  factorization_init: "svd"
 
-  queries_dataset: "Tevatron/msmarco-passage"
   doc_max_length: 128
   query_max_length: 32
   batch_size: 16
@@ -591,8 +33,8 @@ splade_shallow_factorized_spaced_align:
   eval_batch_size: 32
 
   freeze_warmup_steps: 5_000
-  head_lr_scale: 0.01
-  freeze_head_after_warmup: true
+  head_lr_scale: 0.1
+  freeze_head_after_warmup: false
 
   alignment_steps: 50_000
   alignment_lr: 2.0e-4
@@ -609,138 +51,21 @@ splade_shallow_factorized_spaced_align:
 
   log_every: 200
   save_every: 10_000
-  output_dir: "splade_shallow_factorized_spaced_align"
+  output_dir: "splade_shallow"
 
 
-# ── Stage: Shallow SPLADE cross-encoder distillation ─────────────────────────
-# Same query/doc architecture as splade_shallow_align, but the loss is
-# traditional cross-encoder MarginMSE:
-#   CE(q,pos) - CE(q,neg) ≈ dot(q_student,d_pos_full_splade) - dot(q_student,d_neg_full_splade)
-# The document encoder stays frozen; only the shallow query encoder learns.
-#
-# SPLADE-v3 used SparseDistillKLDivLoss and SparseMarginMSELoss with an ensemble
-# of five cross-encoder rerankers. For a first local experiment this uses a
-# single public MS MARCO cross-encoder; swap cross_encoder_hf_id for a heavier
-# teacher once the loop is validated.
-#
-# Run: uv run train.py splade_shallow_align_distill --config config.yaml
-splade_shallow_align_distill:
-  doc_splade_hf_id: "naver/splade-v3"
+lion_shallow:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+
+  # First-N example:
   n_layers: 3
+  # Spaced example:
+  # layer_indices: [0, 3, 6, 10, -1]
 
-  # Original SPLADE++ score source / simple public reranker. SPLADE-v3 used an
-  # ensemble with this plus naver/trecdl22-crossencoder-{rankT53b-repro,
-  # debertav3,debertav2,electra}; use one of those here if you want a stronger
-  # but heavier single teacher.
-  cross_encoder_hf_id: "cross-encoder/ms-marco-MiniLM-L6-v2"
-  teacher_batch_size: 8
-  teacher_max_length: 256
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 4   # effective batch = 16; keep per-step memory 8GB-friendly
-  eval_batch_size: 8               # used for frozen SPLADE passage/eval chunks
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.1
-
-  alignment_steps: 50_000
-  alignment_lr: 1.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  # Cross-encoder logits are arbitrary-scale teacher scores. Raw MarginMSE
-  # alone lets the query model satisfy margins by changing vector mass/nnz, so
-  # keep a full-SPLADE query-vector anchor and rescale/clamp margins.
-  # The anchor is intentionally stronger than the margin term early on: without
-  # it the model can satisfy margins with only a few high-value dimensions.
-  query_anchor_coeff: 0.75
-  teacher_margin_scale: 0.35
-  teacher_margin_clip: 5.0
-  lambda_q: 0.0002
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "splade_shallow_align_distill"
-
-
-# ── Stage: Lion-SP-1B shallow query encoder ───────────────────────────────────
-# Same recipe as splade_shallow_align but applied to Lion-SP-1B (Llama-3 1B).
-# Query encoder = full Lion truncated to n_layers; doc encoder = frozen full Lion.
-# Run: uv run train.py lion_shallow_align --config config.yaml
-lion_shallow_align:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 3
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8   # effective batch = 32
-  eval_batch_size: 4               # Lion is large; keep small to avoid OOM
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.1
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  lambda_q: 0.001
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_align"
-
-
-# ── Stage: Unfactorized shallow Lion, 4 layers, frozen head ──────────────────
-# Same as lion_shallow_align but with 4 layers instead of 3.
-# Run: uv run train.py lion_shallow_align_4l --config config.yaml
-lion_shallow_align_4l:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 4
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  eval_batch_size: 4
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.1
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  lambda_q: 0.001
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_align_4l"
-
-
-# ── Stage: Factorized shallow Lion, 4 layers, 1024-dim, trainable head ───────
-# Same as lion_shallow_factorized_align_3l but with 4 layers.
-# Run: uv run train.py lion_shallow_factorized_align_4l --config config.yaml
-lion_shallow_factorized_align_4l:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 4
+  factorize_embeddings: false
   factorized_embedding_dim: 1024
   factorization_init: "svd"
 
-  queries_dataset: "Tevatron/msmarco-passage"
   doc_max_length: 128
   query_max_length: 32
   batch_size: 4
@@ -748,254 +73,68 @@ lion_shallow_factorized_align_4l:
   eval_batch_size: 4
 
   freeze_warmup_steps: 5_000
-  head_lr_scale: 0.005
-  freeze_head_after_warmup: false
+  head_lr_scale: 0.1
+  freeze_head_after_warmup: true
 
   alignment_steps: 50_000
   alignment_lr: 2.0e-4
+  align_loss_kind: "mse"
   weight_decay: 0.01
   fp16: true
 
   nway: 8
-  lambda_q: 0.001
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_factorized_align_4l"
-
-
-# ── Stage: Factorized shallow Lion, 3 layers, matched to lion_shallow_align ──
-# Identical to lion_shallow_align but replaces the tied 128k×2048 embed/lm_head
-# with an SVD-factorized version (128k×256×2048), making the head trainable at
-# low memory cost. Everything else (lr, lambda_q, nway, batch) is unchanged.
-#
-# Run: uv run train.py lion_shallow_factorized_align_3l --config config.yaml
-lion_shallow_factorized_align_3l:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 3
-  factorized_embedding_dim: 1024
-  factorization_init: "svd"
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  eval_batch_size: 4
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.005
-  freeze_head_after_warmup: false
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  lambda_q: 0.001
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_factorized_align_3l"
-
-
-# ── Stage: Factorized shallow Lion with first 3 layers ───────────────────────
-# Same hyperparameters as lion_shallow_factorized_spaced_align, but keeps the
-# first 3 Lion layers contiguously instead of selecting [0, 6, -1].
-#
-# Run: uv run train.py lion_shallow_factorized_align --config config.yaml
-lion_shallow_factorized_align:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 5
-  factorized_embedding_dim: 256
-  factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8   # effective batch = 32; matches lion_shallow_align
-  eval_batch_size: 4               # frozen full Lion doc encoder is still the memory bottleneck
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.01
-  freeze_head_after_warmup: false  # unfreeze factorized embed_tokens/lm_head after warmup
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  lambda_q: 0.001                 # keep strong pressure; exact-SVD factorized Lion ran dense at 0.0002
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_factorized_align"
-
-
-# ── Stage: Factorized shallow Lion with cosine alignment loss ─────────────────
-# Same as lion_shallow_factorized_align but uses cosine similarity loss instead
-# of MSE on SPLADE vectors. Cosine is scale-invariant and may generalise better
-# when the student's vector magnitudes diverge from the teacher's.
-#
-# Run: uv run train.py lion_shallow_factorized_cosine_align --config config.yaml
-lion_shallow_factorized_cosine_align:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 5
-  factorized_embedding_dim: 256
-  factorization_init: "svd"
-  align_loss_kind: "cosine"
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  eval_batch_size: 4
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.01
-  freeze_head_after_warmup: false
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  lambda_q: 0.001
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_factorized_cosine_align"
-
-
-# ── Stage: Factorized spaced shallow Lion with contrastive alignment ──────────
-# Key changes vs lion_shallow_factorized_align:
-#   1. Spaced layers [0, 3, 6, 10, -1] — captures more of Lion's representational range
-#   2. Contrastive CE loss against frozen Lion passage vectors — direct retrieval signal
-#   3. Stronger lambda_q (0.003) — forces q_nnz toward teacher's ~267 (was stuck at ~707)
-#
-# Run: uv run train.py lion_shallow_factorized_spaced_contrastive_align --config config.yaml
-lion_shallow_factorized_spaced_contrastive_align:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 5
-  layer_indices: [0, 3, 6, 10, -1]
-  factorized_embedding_dim: 256
-  factorization_init: "svd"
-
-  contrastive_coeff: 0.1
+  contrastive_coeff: 0.0
   contrastive_temperature: 1.0
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  eval_batch_size: 4
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.01
-  freeze_head_after_warmup: false
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
-  lambda_q: 0.003
-  lambda_q_warmup_steps: 5_000
-
-  log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_factorized_spaced_contrastive_align"
-
-
-# ── Stage: Non-factorized shallow Lion with spaced doc layers (no contrastive) ─
-# Same hyperparams as lion_shallow_factorized_spaced_contrastive_align but with
-# factorized=False and no contrastive loss, to isolate their effect.
-#
-# Run: uv run train.py lion_shallow_spaced_align --config config.yaml
-lion_shallow_spaced_align:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 3
-
-  queries_dataset: "Tevatron/msmarco-passage"
-  doc_max_length: 128
-  query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  eval_batch_size: 4
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.1
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
-  nway: 8
   lambda_q: 0.001
   lambda_q_warmup_steps: 5_000
 
   log_every: 200
   save_every: 10_000
-  output_dir: "lion_shallow_spaced_align"
+  output_dir: "lion_shallow"
 
 
-# ── Stage: Factorized shallow Lion with spaced doc layers ────────────────────
-# Lion analog of splade_shallow_factorized_spaced_align.
-# Query encoder = 5 spaced Lion layers [0, 3, 6, 10, -1] with an ALBERT-style tied
-# factorized embed_tokens / lm_head lexical matrix. The factorized lexical
-# factors/head unfreeze after warmup at a low LR, so this isolates whether
-# training the compressed Lion lexical basis helps.
-#
-# Run: uv run train.py lion_shallow_factorized_spaced_align --config config.yaml
-lion_shallow_factorized_spaced_align:
-  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
-  n_layers: 5
-  layer_indices: [0, 3, 6, 10, -1]  # spaced 5-layer slice from Lion-SP-1B
-  factorized_embedding_dim: 256
-  factorization_init: "svd"       # exact SVD init from Lion's full lexical matrix
+splade_static:
+  doc_splade_hf_id: "naver/splade-v3"
 
-  queries_dataset: "Tevatron/msmarco-passage"
   doc_max_length: 128
   query_max_length: 32
-  batch_size: 4
-  gradient_accumulation_steps: 8   # effective batch = 32; matches lion_shallow_align
-  eval_batch_size: 4               # frozen full Lion doc encoder is still the memory bottleneck
-
-  freeze_warmup_steps: 5_000
-  head_lr_scale: 0.01
-  freeze_head_after_warmup: false  # unfreeze factorized embed_tokens/lm_head after warmup
-
-  alignment_steps: 50_000
-  alignment_lr: 2.0e-4
-  weight_decay: 0.01
-  fp16: true
-
+  batch_size: 32
+  eval_batch_size: 64
   nway: 8
-  lambda_q: 0.001                 # keep strong pressure; exact-SVD factorized Lion ran dense at 0.0002
-  lambda_q_warmup_steps: 5_000
+
+  alignment_steps: 10_000
+  alignment_lr: 1.0e-3
+  weight_decay: 0.0
+  fp16: true
+  lambda_q: 0.0
 
   log_every: 200
-  save_every: 10_000
-  output_dir: "lion_shallow_factorized_spaced_align"
+  save_every: 1_000
+  output_dir: "splade_static"
 
 
-# ── Evaluation ────────────────────────────────────────────────────────────────
+lion_static:
+  lion_hf_id: "hzeng/Lion-SP-1B-llama3-marco-mntp"
+
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 32
+  eval_batch_size: 32
+  nway: 8
+
+  alignment_steps: 10_000
+  alignment_lr: 1.0e-3
+  weight_decay: 0.0
+  fp16: true
+  lambda_q: 0.0
+
+  log_every: 200
+  save_every: 1_000
+  output_dir: "lion_static"
+
+
 eval:
-  # NanoBEIR datasets to evaluate on (zeta-alpha-ai collection, ~50 queries each)
-  # Runs once before training starts, then after every save_every steps.
   datasets:
-    - "zeta-alpha-ai/NanoMSMARCO"     # in-domain sanity check
-    - "zeta-alpha-ai/NanoNFCorpus"    # out-of-domain generalisation
-  batch_size: 32                       # encoding batch size for eval
+    - "zeta-alpha-ai/NanoMSMARCO"
+    - "zeta-alpha-ai/NanoNFCorpus"
+  batch_size: 32

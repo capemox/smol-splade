@@ -1,0 +1,1 @@
+$ /home/capemox/projects/sae-smo-splade/.venv/bin/python3 train.py lion_shallow --config /home/capemox/projects/sae-smo-splade/runs/head_unfrozen_ablation/config_lion_spaced5_head_unfrozen.yaml

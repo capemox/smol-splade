@@ -1,0 +1,335 @@
+Device: cuda
+[lion-shallow] lion=hzeng/Lion-SP-1B-llama3-marco-mntp | n_layers=4 | freeze_warmup=5000 | alignment=50000 | lr=0.0002 | head_lr_scale=0.1 | nway=8 | lambda_q=0.001 | grad_accum=8 | freeze_head_after_warmup=True
+[lion-shallow] Loading frozen Lion doc encoder …
+[FrozenLionSPLADE] Loading hzeng/Lion-SP-1B-llama3-marco-mntp …
+[FrozenLionSPLADE] Base model: meta-llama/Llama-3.2-1B
+
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]
+Loading weights:  82%|████████▏ | 120/146 [00:00<00:00, 1177.90it/s]
+Loading weights: 100%|██████████| 146/146 [00:00<00:00, 1217.09it/s]
+[lion-shallow] Building 4-layer shallow Lion query encoder …
+[lion-shallow] Using explicit Lion layer indices for query body: [12, 13, 14, 15]
+[ShallowLionQuery] Base: meta-llama/Llama-3.2-1B
+
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 146/146 [00:00<00:00, 10145.27it/s]
+/home/capemox/projects/sae-smo-splade/train.py:3300: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = GradScaler(enabled=False)
+[lion-shallow] Query model: 506.0M params (4/16 layers kept).
+[lion-shallow] Phase 0 (frozen warmup). Trainable: 243.3M / 506.0M
+[lion-shallow] Initial eval …
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (doc_doc ceiling) …
+  [NanoMSMARCO] NDCG@10  doc_doc (ceiling) : 0.6510
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.0071
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (doc_doc ceiling) …
+  [NanoNFCorpus] NDCG@10  doc_doc (ceiling) : 0.3480
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.0221
+[lion-shallow] Training loop (50000 steps remaining) …
+[lion-shallow/warm] step    200 | loss 27.4629 (rank 27.461 ctr 0.000) | q_nnz 1457.2 (teacher 344.8) | flops 61.0 | p@1 s=0.25 t=1.00 | lr 2.00e-04 | 19s
+[lion-shallow/warm] step    400 | loss 22.4284 (rank 22.426 ctr 0.000) | q_nnz 1272.0 (teacher 240.0) | flops 29.9 | p@1 s=0.25 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step    600 | loss 25.6269 (rank 25.623 ctr 0.000) | q_nnz 1648.5 (teacher 284.0) | flops 36.1 | p@1 s=0.50 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step    800 | loss 23.4746 (rank 23.471 ctr 0.000) | q_nnz 958.5 (teacher 269.0) | flops 21.8 | p@1 s=0.00 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   1000 | loss 24.9315 (rank 24.924 ctr 0.000) | q_nnz 1672.8 (teacher 290.0) | flops 38.9 | p@1 s=0.25 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   1200 | loss 20.3636 (rank 20.354 ctr 0.000) | q_nnz 1241.5 (teacher 234.2) | flops 41.5 | p@1 s=1.00 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   1400 | loss 21.1475 (rank 21.142 ctr 0.000) | q_nnz 400.0 (teacher 325.5) | flops 18.6 | p@1 s=0.50 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   1600 | loss 22.3546 (rank 22.331 ctr 0.000) | q_nnz 463.8 (teacher 234.8) | flops 74.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   1800 | loss 16.7495 (rank 16.734 ctr 0.000) | q_nnz 196.2 (teacher 288.8) | flops 42.3 | p@1 s=0.50 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   2000 | loss 20.9568 (rank 20.935 ctr 0.000) | q_nnz 283.2 (teacher 275.2) | flops 55.4 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   2200 | loss 15.5583 (rank 15.540 ctr 0.000) | q_nnz 216.2 (teacher 369.5) | flops 41.0 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   2400 | loss 14.8413 (rank 14.817 ctr 0.000) | q_nnz 251.2 (teacher 267.2) | flops 50.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   2600 | loss 18.2497 (rank 18.222 ctr 0.000) | q_nnz 215.0 (teacher 287.2) | flops 53.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 16s
+[lion-shallow/warm] step   2800 | loss 17.8004 (rank 17.769 ctr 0.000) | q_nnz 247.2 (teacher 298.2) | flops 56.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   3000 | loss 18.9713 (rank 18.935 ctr 0.000) | q_nnz 222.5 (teacher 281.5) | flops 60.0 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   3200 | loss 18.2114 (rank 18.186 ctr 0.000) | q_nnz 160.2 (teacher 283.8) | flops 39.6 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   3400 | loss 22.1782 (rank 22.146 ctr 0.000) | q_nnz 187.0 (teacher 279.8) | flops 47.8 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   3600 | loss 21.2850 (rank 21.248 ctr 0.000) | q_nnz 193.2 (teacher 263.5) | flops 51.8 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   3800 | loss 24.0989 (rank 24.053 ctr 0.000) | q_nnz 214.2 (teacher 264.2) | flops 60.3 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   4000 | loss 28.6116 (rank 28.570 ctr 0.000) | q_nnz 204.2 (teacher 293.8) | flops 52.6 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   4200 | loss 24.0962 (rank 24.051 ctr 0.000) | q_nnz 214.0 (teacher 310.5) | flops 53.8 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   4400 | loss 28.1539 (rank 28.099 ctr 0.000) | q_nnz 225.5 (teacher 261.2) | flops 62.3 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   4600 | loss 24.6906 (rank 24.642 ctr 0.000) | q_nnz 179.0 (teacher 199.2) | flops 53.1 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   4800 | loss 28.0136 (rank 27.956 ctr 0.000) | q_nnz 224.8 (teacher 255.0) | flops 60.2 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/warm] step   5000 | loss 29.4636 (rank 29.413 ctr 0.000) | q_nnz 185.2 (teacher 289.0) | flops 50.7 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 19s
+[lion-shallow] Step 5000: switched to Phase 1 (body + norm; lexical factors/head frozen).
+[lion-shallow/full] step   5200 | loss 29.1884 (rank 29.130 ctr 0.000) | q_nnz 196.8 (teacher 300.8) | flops 58.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   5400 | loss 32.2287 (rank 32.172 ctr 0.000) | q_nnz 211.0 (teacher 296.0) | flops 57.2 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   5600 | loss 30.2848 (rank 30.231 ctr 0.000) | q_nnz 196.8 (teacher 333.0) | flops 54.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   5800 | loss 32.5606 (rank 32.496 ctr 0.000) | q_nnz 219.8 (teacher 340.8) | flops 64.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   6000 | loss 28.3495 (rank 28.291 ctr 0.000) | q_nnz 195.8 (teacher 264.5) | flops 58.4 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   6200 | loss 30.8470 (rank 30.793 ctr 0.000) | q_nnz 189.0 (teacher 273.2) | flops 54.0 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   6400 | loss 30.0362 (rank 29.980 ctr 0.000) | q_nnz 193.8 (teacher 345.5) | flops 56.1 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   6600 | loss 30.0170 (rank 29.956 ctr 0.000) | q_nnz 211.8 (teacher 365.5) | flops 61.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   6800 | loss 32.4200 (rank 32.357 ctr 0.000) | q_nnz 199.5 (teacher 271.8) | flops 62.6 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   7000 | loss 32.5773 (rank 32.512 ctr 0.000) | q_nnz 216.0 (teacher 327.0) | flops 65.1 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   7200 | loss 31.7298 (rank 31.666 ctr 0.000) | q_nnz 214.0 (teacher 301.2) | flops 63.7 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   7400 | loss 29.9009 (rank 29.844 ctr 0.000) | q_nnz 203.2 (teacher 275.0) | flops 57.0 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   7600 | loss 27.5994 (rank 27.540 ctr 0.000) | q_nnz 218.8 (teacher 330.5) | flops 59.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 15s
+[lion-shallow/full] step   7800 | loss 31.9347 (rank 31.879 ctr 0.000) | q_nnz 188.2 (teacher 310.5) | flops 55.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   8000 | loss 25.7805 (rank 25.719 ctr 0.000) | q_nnz 210.0 (teacher 236.8) | flops 61.2 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   8200 | loss 32.5632 (rank 32.498 ctr 0.000) | q_nnz 211.2 (teacher 346.0) | flops 65.2 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   8400 | loss 30.7571 (rank 30.697 ctr 0.000) | q_nnz 201.8 (teacher 291.2) | flops 59.9 | p@1 s=1.00 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   8600 | loss 29.1663 (rank 29.100 ctr 0.000) | q_nnz 224.2 (teacher 330.5) | flops 66.4 | p@1 s=0.50 t=0.50 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   8800 | loss 29.7218 (rank 29.659 ctr 0.000) | q_nnz 214.8 (teacher 264.0) | flops 63.0 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   9000 | loss 27.6250 (rank 27.566 ctr 0.000) | q_nnz 197.5 (teacher 231.0) | flops 59.4 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   9200 | loss 30.9879 (rank 30.913 ctr 0.000) | q_nnz 238.8 (teacher 244.2) | flops 74.7 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   9400 | loss 29.9345 (rank 29.869 ctr 0.000) | q_nnz 225.8 (teacher 326.5) | flops 65.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   9600 | loss 29.6481 (rank 29.591 ctr 0.000) | q_nnz 200.2 (teacher 334.8) | flops 57.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step   9800 | loss 32.2898 (rank 32.229 ctr 0.000) | q_nnz 191.5 (teacher 247.2) | flops 61.2 | p@1 s=0.50 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  10000 | loss 30.9081 (rank 30.844 ctr 0.000) | q_nnz 221.8 (teacher 287.5) | flops 63.7 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 16s
+  Saved → checkpoints_lion_shallow/lion_shallow_last4/align_step_10000.pt
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.6234
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.2800
+  New best NanoMSMARCO query_doc NDCG@10=0.6234 → checkpoints_lion_shallow/lion_shallow_last4/best_NanoMSMARCO.pt
+[lion-shallow/full] step  10200 | loss 32.2086 (rank 32.138 ctr 0.000) | q_nnz 225.0 (teacher 246.5) | flops 71.0 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 140s
+[lion-shallow/full] step  10400 | loss 30.0305 (rank 29.983 ctr 0.000) | q_nnz 181.5 (teacher 349.2) | flops 47.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  10600 | loss 30.6842 (rank 30.610 ctr 0.000) | q_nnz 255.2 (teacher 379.5) | flops 74.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  10800 | loss 32.2677 (rank 32.203 ctr 0.000) | q_nnz 220.0 (teacher 350.5) | flops 65.1 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  11000 | loss 30.7402 (rank 30.670 ctr 0.000) | q_nnz 228.5 (teacher 281.5) | flops 70.1 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  11200 | loss 33.4515 (rank 33.388 ctr 0.000) | q_nnz 214.8 (teacher 311.8) | flops 64.0 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  11400 | loss 28.6645 (rank 28.602 ctr 0.000) | q_nnz 208.2 (teacher 251.8) | flops 62.8 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  11600 | loss 32.3767 (rank 32.308 ctr 0.000) | q_nnz 229.0 (teacher 318.2) | flops 68.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  11800 | loss 32.4691 (rank 32.411 ctr 0.000) | q_nnz 186.5 (teacher 265.2) | flops 58.6 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  12000 | loss 28.7336 (rank 28.669 ctr 0.000) | q_nnz 208.0 (teacher 241.0) | flops 65.1 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  12200 | loss 29.7421 (rank 29.682 ctr 0.000) | q_nnz 201.0 (teacher 285.2) | flops 59.7 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  12400 | loss 26.3998 (rank 26.346 ctr 0.000) | q_nnz 196.5 (teacher 304.8) | flops 53.6 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  12600 | loss 30.8943 (rank 30.836 ctr 0.000) | q_nnz 204.0 (teacher 279.8) | flops 58.7 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 16s
+[lion-shallow/full] step  12800 | loss 32.5230 (rank 32.456 ctr 0.000) | q_nnz 243.5 (teacher 303.5) | flops 66.6 | p@1 s=0.75 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  13000 | loss 29.0928 (rank 29.032 ctr 0.000) | q_nnz 203.0 (teacher 286.8) | flops 60.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  13200 | loss 27.3848 (rank 27.329 ctr 0.000) | q_nnz 204.5 (teacher 315.5) | flops 55.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  13400 | loss 28.4333 (rank 28.379 ctr 0.000) | q_nnz 183.8 (teacher 318.8) | flops 54.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  13600 | loss 31.1509 (rank 31.082 ctr 0.000) | q_nnz 229.2 (teacher 264.5) | flops 68.5 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  13800 | loss 32.3188 (rank 32.245 ctr 0.000) | q_nnz 244.8 (teacher 322.2) | flops 73.6 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 9s
+[lion-shallow/full] step  14000 | loss 29.6082 (rank 29.547 ctr 0.000) | q_nnz 211.2 (teacher 293.8) | flops 61.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  14200 | loss 30.1253 (rank 30.059 ctr 0.000) | q_nnz 225.5 (teacher 287.8) | flops 66.2 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  14400 | loss 29.5807 (rank 29.510 ctr 0.000) | q_nnz 235.0 (teacher 280.8) | flops 70.3 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  14600 | loss 31.5820 (rank 31.520 ctr 0.000) | q_nnz 207.8 (teacher 257.2) | flops 62.4 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  14800 | loss 33.0680 (rank 33.005 ctr 0.000) | q_nnz 222.0 (teacher 343.8) | flops 63.4 | p@1 s=0.50 t=0.75 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  15000 | loss 30.9580 (rank 30.886 ctr 0.000) | q_nnz 234.2 (teacher 296.8) | flops 71.7 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 16s
+[lion-shallow/full] step  15200 | loss 28.3383 (rank 28.275 ctr 0.000) | q_nnz 210.8 (teacher 280.0) | flops 63.4 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  15400 | loss 31.0220 (rank 30.962 ctr 0.000) | q_nnz 193.8 (teacher 274.0) | flops 60.0 | p@1 s=1.00 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  15600 | loss 29.2495 (rank 29.188 ctr 0.000) | q_nnz 209.0 (teacher 305.2) | flops 61.1 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  15800 | loss 29.0089 (rank 28.937 ctr 0.000) | q_nnz 238.8 (teacher 301.5) | flops 72.4 | p@1 s=0.75 t=1.00 | lr 2.00e-04 | 8s
+[lion-shallow/full] step  16000 | loss 33.2554 (rank 33.187 ctr 0.000) | q_nnz 214.0 (teacher 260.2) | flops 68.0 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  16200 | loss 30.4643 (rank 30.393 ctr 0.000) | q_nnz 239.8 (teacher 335.2) | flops 71.3 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  16400 | loss 29.0370 (rank 28.977 ctr 0.000) | q_nnz 198.5 (teacher 262.5) | flops 59.8 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  16600 | loss 28.3489 (rank 28.280 ctr 0.000) | q_nnz 224.5 (teacher 241.5) | flops 68.7 | p@1 s=1.00 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  16800 | loss 30.3569 (rank 30.296 ctr 0.000) | q_nnz 199.5 (teacher 259.8) | flops 60.8 | p@1 s=0.75 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  17000 | loss 27.6053 (rank 27.540 ctr 0.000) | q_nnz 218.0 (teacher 258.8) | flops 65.6 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  17200 | loss 29.2949 (rank 29.233 ctr 0.000) | q_nnz 199.5 (teacher 264.8) | flops 61.8 | p@1 s=0.75 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  17400 | loss 28.3854 (rank 28.323 ctr 0.000) | q_nnz 214.2 (teacher 232.0) | flops 62.7 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  17600 | loss 27.7410 (rank 27.682 ctr 0.000) | q_nnz 195.2 (teacher 277.5) | flops 59.4 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 16s
+[lion-shallow/full] step  17800 | loss 28.3403 (rank 28.275 ctr 0.000) | q_nnz 224.8 (teacher 302.8) | flops 65.5 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  18000 | loss 31.3334 (rank 31.277 ctr 0.000) | q_nnz 203.2 (teacher 336.8) | flops 56.1 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  18200 | loss 30.7873 (rank 30.721 ctr 0.000) | q_nnz 213.0 (teacher 241.0) | flops 66.5 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  18400 | loss 30.5816 (rank 30.518 ctr 0.000) | q_nnz 217.8 (teacher 314.0) | flops 63.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  18600 | loss 30.8602 (rank 30.800 ctr 0.000) | q_nnz 199.8 (teacher 264.2) | flops 59.8 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  18800 | loss 30.2219 (rank 30.155 ctr 0.000) | q_nnz 231.5 (teacher 307.8) | flops 66.7 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  19000 | loss 30.9241 (rank 30.862 ctr 0.000) | q_nnz 205.5 (teacher 332.2) | flops 61.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  19200 | loss 31.0649 (rank 30.997 ctr 0.000) | q_nnz 220.5 (teacher 298.0) | flops 68.0 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  19400 | loss 32.8037 (rank 32.749 ctr 0.000) | q_nnz 190.2 (teacher 327.5) | flops 55.1 | p@1 s=0.75 t=1.00 | lr 1.99e-04 | 9s
+[lion-shallow/full] step  19600 | loss 30.3683 (rank 30.305 ctr 0.000) | q_nnz 209.2 (teacher 314.2) | flops 63.1 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  19800 | loss 27.6522 (rank 27.591 ctr 0.000) | q_nnz 210.0 (teacher 275.5) | flops 60.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  20000 | loss 32.7446 (rank 32.681 ctr 0.000) | q_nnz 200.2 (teacher 292.2) | flops 63.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 16s
+  Saved → checkpoints_lion_shallow/lion_shallow_last4/align_step_20000.pt
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.6584
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.2922
+  New best NanoMSMARCO query_doc NDCG@10=0.6584 → checkpoints_lion_shallow/lion_shallow_last4/best_NanoMSMARCO.pt
+[lion-shallow/full] step  20200 | loss 28.5562 (rank 28.495 ctr 0.000) | q_nnz 220.8 (teacher 347.5) | flops 60.7 | p@1 s=0.50 t=0.50 | lr 1.99e-04 | 140s
+[lion-shallow/full] step  20400 | loss 28.7179 (rank 28.650 ctr 0.000) | q_nnz 213.8 (teacher 228.0) | flops 67.8 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  20600 | loss 27.0557 (rank 26.995 ctr 0.000) | q_nnz 197.5 (teacher 220.5) | flops 60.7 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  20800 | loss 33.1251 (rank 33.052 ctr 0.000) | q_nnz 231.0 (teacher 301.5) | flops 72.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  21000 | loss 28.9907 (rank 28.929 ctr 0.000) | q_nnz 196.0 (teacher 288.5) | flops 61.7 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  21200 | loss 29.3088 (rank 29.241 ctr 0.000) | q_nnz 220.8 (teacher 237.5) | flops 68.2 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  21400 | loss 30.0035 (rank 29.941 ctr 0.000) | q_nnz 208.0 (teacher 299.2) | flops 62.1 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  21600 | loss 27.7018 (rank 27.645 ctr 0.000) | q_nnz 203.0 (teacher 279.5) | flops 57.2 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  21800 | loss 29.9647 (rank 29.896 ctr 0.000) | q_nnz 238.8 (teacher 336.0) | flops 68.2 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  22000 | loss 31.0826 (rank 31.019 ctr 0.000) | q_nnz 215.8 (teacher 376.5) | flops 63.3 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  22200 | loss 26.2593 (rank 26.207 ctr 0.000) | q_nnz 189.0 (teacher 301.8) | flops 52.1 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  22400 | loss 30.2873 (rank 30.225 ctr 0.000) | q_nnz 210.5 (teacher 271.2) | flops 62.4 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  22600 | loss 28.3746 (rank 28.315 ctr 0.000) | q_nnz 209.5 (teacher 320.2) | flops 59.5 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 16s
+[lion-shallow/full] step  22800 | loss 29.5645 (rank 29.501 ctr 0.000) | q_nnz 210.0 (teacher 262.5) | flops 63.4 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  23000 | loss 29.9370 (rank 29.872 ctr 0.000) | q_nnz 212.5 (teacher 271.0) | flops 65.0 | p@1 s=0.75 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  23200 | loss 26.4494 (rank 26.396 ctr 0.000) | q_nnz 203.8 (teacher 324.2) | flops 53.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  23400 | loss 28.4650 (rank 28.400 ctr 0.000) | q_nnz 205.2 (teacher 217.2) | flops 65.5 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 9s
+[lion-shallow/full] step  23600 | loss 30.5123 (rank 30.449 ctr 0.000) | q_nnz 213.2 (teacher 298.8) | flops 63.8 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  23800 | loss 30.8829 (rank 30.808 ctr 0.000) | q_nnz 261.5 (teacher 290.5) | flops 75.3 | p@1 s=0.50 t=0.50 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  24000 | loss 27.8255 (rank 27.767 ctr 0.000) | q_nnz 199.2 (teacher 254.0) | flops 59.0 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  24200 | loss 29.4102 (rank 29.351 ctr 0.000) | q_nnz 195.8 (teacher 227.8) | flops 59.2 | p@1 s=0.50 t=0.75 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  24400 | loss 28.6964 (rank 28.629 ctr 0.000) | q_nnz 224.0 (teacher 324.2) | flops 66.9 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 9s
+[lion-shallow/full] step  24600 | loss 29.5491 (rank 29.477 ctr 0.000) | q_nnz 238.8 (teacher 293.2) | flops 71.6 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  24800 | loss 32.7191 (rank 32.661 ctr 0.000) | q_nnz 198.5 (teacher 349.0) | flops 58.2 | p@1 s=1.00 t=1.00 | lr 1.99e-04 | 8s
+[lion-shallow/full] step  25000 | loss 30.9355 (rank 30.875 ctr 0.000) | q_nnz 213.0 (teacher 301.5) | flops 60.7 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 16s
+[lion-shallow/full] step  25200 | loss 28.4831 (rank 28.411 ctr 0.000) | q_nnz 239.0 (teacher 284.5) | flops 71.7 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  25400 | loss 27.3377 (rank 27.275 ctr 0.000) | q_nnz 204.5 (teacher 269.0) | flops 62.7 | p@1 s=0.75 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  25600 | loss 30.6852 (rank 30.622 ctr 0.000) | q_nnz 201.8 (teacher 290.0) | flops 62.7 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  25800 | loss 27.9593 (rank 27.903 ctr 0.000) | q_nnz 203.5 (teacher 331.5) | flops 56.6 | p@1 s=0.75 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  26000 | loss 27.5025 (rank 27.442 ctr 0.000) | q_nnz 199.2 (teacher 278.2) | flops 60.1 | p@1 s=0.50 t=0.75 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  26200 | loss 31.2391 (rank 31.174 ctr 0.000) | q_nnz 232.8 (teacher 318.2) | flops 65.3 | p@1 s=0.75 t=0.75 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  26400 | loss 29.7206 (rank 29.660 ctr 0.000) | q_nnz 207.5 (teacher 319.0) | flops 60.3 | p@1 s=0.75 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  26600 | loss 32.3800 (rank 32.306 ctr 0.000) | q_nnz 241.5 (teacher 329.2) | flops 73.6 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  26800 | loss 32.3926 (rank 32.324 ctr 0.000) | q_nnz 228.8 (teacher 318.2) | flops 69.0 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  27000 | loss 29.3158 (rank 29.250 ctr 0.000) | q_nnz 218.2 (teacher 288.2) | flops 65.5 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  27200 | loss 29.0618 (rank 28.996 ctr 0.000) | q_nnz 214.2 (teacher 283.2) | flops 65.4 | p@1 s=0.75 t=0.75 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  27400 | loss 28.7741 (rank 28.709 ctr 0.000) | q_nnz 217.0 (teacher 263.0) | flops 64.6 | p@1 s=0.50 t=0.50 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  27600 | loss 29.0012 (rank 28.934 ctr 0.000) | q_nnz 228.8 (teacher 280.8) | flops 67.4 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 16s
+[lion-shallow/full] step  27800 | loss 32.0049 (rank 31.943 ctr 0.000) | q_nnz 215.2 (teacher 287.2) | flops 62.1 | p@1 s=0.75 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  28000 | loss 30.1546 (rank 30.081 ctr 0.000) | q_nnz 240.8 (teacher 285.0) | flops 73.9 | p@1 s=0.75 t=0.75 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  28200 | loss 29.7520 (rank 29.692 ctr 0.000) | q_nnz 231.5 (teacher 382.2) | flops 60.2 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  28400 | loss 28.2488 (rank 28.176 ctr 0.000) | q_nnz 254.2 (teacher 318.8) | flops 72.8 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  28600 | loss 30.8478 (rank 30.784 ctr 0.000) | q_nnz 217.2 (teacher 303.0) | flops 63.9 | p@1 s=0.75 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  28800 | loss 30.3374 (rank 30.272 ctr 0.000) | q_nnz 213.2 (teacher 261.5) | flops 65.4 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  29000 | loss 30.1779 (rank 30.115 ctr 0.000) | q_nnz 225.0 (teacher 330.5) | flops 62.7 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  29200 | loss 29.0259 (rank 28.964 ctr 0.000) | q_nnz 206.8 (teacher 283.8) | flops 62.0 | p@1 s=0.75 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  29400 | loss 30.9954 (rank 30.931 ctr 0.000) | q_nnz 213.8 (teacher 279.5) | flops 64.3 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  29600 | loss 28.3373 (rank 28.277 ctr 0.000) | q_nnz 203.8 (teacher 304.5) | flops 60.0 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  29800 | loss 29.8787 (rank 29.812 ctr 0.000) | q_nnz 238.0 (teacher 350.5) | flops 66.8 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  30000 | loss 28.9992 (rank 28.927 ctr 0.000) | q_nnz 237.8 (teacher 298.8) | flops 72.3 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 16s
+  Saved → checkpoints_lion_shallow/lion_shallow_last4/align_step_30000.pt
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.6703
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.3019
+  New best NanoMSMARCO query_doc NDCG@10=0.6703 → checkpoints_lion_shallow/lion_shallow_last4/best_NanoMSMARCO.pt
+[lion-shallow/full] step  30200 | loss 30.2010 (rank 30.139 ctr 0.000) | q_nnz 210.8 (teacher 303.8) | flops 62.1 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 141s
+[lion-shallow/full] step  30400 | loss 30.5200 (rank 30.458 ctr 0.000) | q_nnz 213.2 (teacher 277.8) | flops 62.4 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  30600 | loss 27.7230 (rank 27.661 ctr 0.000) | q_nnz 206.8 (teacher 320.5) | flops 62.1 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  30800 | loss 26.8284 (rank 26.763 ctr 0.000) | q_nnz 204.5 (teacher 206.5) | flops 65.2 | p@1 s=1.00 t=1.00 | lr 1.98e-04 | 8s
+[lion-shallow/full] step  31000 | loss 28.3519 (rank 28.289 ctr 0.000) | q_nnz 207.8 (teacher 310.5) | flops 62.8 | p@1 s=0.50 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  31200 | loss 30.2261 (rank 30.166 ctr 0.000) | q_nnz 201.8 (teacher 306.2) | flops 60.0 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  31400 | loss 29.3083 (rank 29.239 ctr 0.000) | q_nnz 239.5 (teacher 344.2) | flops 69.4 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  31600 | loss 30.2091 (rank 30.144 ctr 0.000) | q_nnz 210.0 (teacher 204.0) | flops 65.1 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  31800 | loss 27.7152 (rank 27.650 ctr 0.000) | q_nnz 216.2 (teacher 257.2) | flops 65.6 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  32000 | loss 29.8824 (rank 29.816 ctr 0.000) | q_nnz 214.8 (teacher 282.0) | flops 66.0 | p@1 s=0.75 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  32200 | loss 29.3053 (rank 29.242 ctr 0.000) | q_nnz 203.0 (teacher 240.5) | flops 63.3 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  32400 | loss 31.3157 (rank 31.250 ctr 0.000) | q_nnz 214.8 (teacher 280.8) | flops 65.4 | p@1 s=0.75 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  32600 | loss 34.6841 (rank 34.613 ctr 0.000) | q_nnz 212.0 (teacher 359.5) | flops 70.9 | p@1 s=0.50 t=1.00 | lr 1.97e-04 | 16s
+[lion-shallow/full] step  32800 | loss 28.9766 (rank 28.916 ctr 0.000) | q_nnz 204.0 (teacher 222.8) | flops 60.8 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  33000 | loss 32.2769 (rank 32.212 ctr 0.000) | q_nnz 207.2 (teacher 289.5) | flops 64.9 | p@1 s=0.50 t=0.75 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  33200 | loss 30.7731 (rank 30.708 ctr 0.000) | q_nnz 204.5 (teacher 215.0) | flops 65.6 | p@1 s=0.75 t=0.75 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  33400 | loss 29.4292 (rank 29.369 ctr 0.000) | q_nnz 219.0 (teacher 310.5) | flops 59.9 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  33600 | loss 29.2093 (rank 29.146 ctr 0.000) | q_nnz 214.2 (teacher 282.5) | flops 62.9 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  33800 | loss 28.6739 (rank 28.605 ctr 0.000) | q_nnz 225.2 (teacher 306.0) | flops 69.1 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  34000 | loss 32.3876 (rank 32.320 ctr 0.000) | q_nnz 219.8 (teacher 332.5) | flops 67.9 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  34200 | loss 31.9836 (rank 31.911 ctr 0.000) | q_nnz 248.5 (teacher 429.2) | flops 72.5 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  34400 | loss 31.8928 (rank 31.818 ctr 0.000) | q_nnz 241.0 (teacher 359.2) | flops 74.4 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  34600 | loss 26.6871 (rank 26.628 ctr 0.000) | q_nnz 193.5 (teacher 221.2) | flops 58.7 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  34800 | loss 30.4923 (rank 30.425 ctr 0.000) | q_nnz 222.5 (teacher 279.0) | flops 67.4 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  35000 | loss 30.2965 (rank 30.229 ctr 0.000) | q_nnz 223.0 (teacher 315.0) | flops 67.6 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 16s
+[lion-shallow/full] step  35200 | loss 28.6645 (rank 28.598 ctr 0.000) | q_nnz 226.2 (teacher 366.2) | flops 66.2 | p@1 s=0.75 t=1.00 | lr 1.97e-04 | 9s
+[lion-shallow/full] step  35400 | loss 30.5898 (rank 30.520 ctr 0.000) | q_nnz 236.8 (teacher 317.5) | flops 69.7 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  35600 | loss 32.3021 (rank 32.229 ctr 0.000) | q_nnz 229.0 (teacher 301.0) | flops 73.0 | p@1 s=1.00 t=0.75 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  35800 | loss 29.0422 (rank 28.979 ctr 0.000) | q_nnz 220.8 (teacher 231.0) | flops 63.2 | p@1 s=1.00 t=1.00 | lr 1.97e-04 | 8s
+[lion-shallow/full] step  36000 | loss 31.7828 (rank 31.710 ctr 0.000) | q_nnz 234.0 (teacher 251.2) | flops 72.8 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  36200 | loss 28.5778 (rank 28.513 ctr 0.000) | q_nnz 211.0 (teacher 270.8) | flops 64.7 | p@1 s=0.75 t=0.75 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  36400 | loss 29.3295 (rank 29.263 ctr 0.000) | q_nnz 217.8 (teacher 236.8) | flops 66.9 | p@1 s=0.75 t=0.75 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  36600 | loss 29.0521 (rank 28.985 ctr 0.000) | q_nnz 226.0 (teacher 337.8) | flops 67.5 | p@1 s=0.75 t=0.75 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  36800 | loss 28.8737 (rank 28.800 ctr 0.000) | q_nnz 235.2 (teacher 284.5) | flops 73.9 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  37000 | loss 29.5251 (rank 29.461 ctr 0.000) | q_nnz 215.8 (teacher 247.0) | flops 64.4 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 9s
+[lion-shallow/full] step  37200 | loss 28.7495 (rank 28.680 ctr 0.000) | q_nnz 229.2 (teacher 251.0) | flops 69.7 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  37400 | loss 27.0287 (rank 26.966 ctr 0.000) | q_nnz 204.0 (teacher 265.5) | flops 62.2 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 16s
+[lion-shallow/full] step  37600 | loss 30.1725 (rank 30.108 ctr 0.000) | q_nnz 225.8 (teacher 353.0) | flops 65.0 | p@1 s=1.00 t=0.75 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  37800 | loss 29.8331 (rank 29.766 ctr 0.000) | q_nnz 213.8 (teacher 236.2) | flops 66.7 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  38000 | loss 29.8591 (rank 29.799 ctr 0.000) | q_nnz 208.5 (teacher 305.0) | flops 60.4 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  38200 | loss 28.3306 (rank 28.265 ctr 0.000) | q_nnz 215.0 (teacher 263.0) | flops 65.8 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  38400 | loss 28.0360 (rank 27.973 ctr 0.000) | q_nnz 227.0 (teacher 310.8) | flops 63.3 | p@1 s=0.75 t=0.75 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  38600 | loss 29.9752 (rank 29.912 ctr 0.000) | q_nnz 215.8 (teacher 263.0) | flops 63.5 | p@1 s=0.75 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  38800 | loss 28.9587 (rank 28.896 ctr 0.000) | q_nnz 222.5 (teacher 338.5) | flops 62.5 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  39000 | loss 28.2417 (rank 28.174 ctr 0.000) | q_nnz 226.8 (teacher 280.0) | flops 67.8 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  39200 | loss 29.6812 (rank 29.610 ctr 0.000) | q_nnz 222.5 (teacher 303.5) | flops 71.1 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 9s
+[lion-shallow/full] step  39400 | loss 32.1757 (rank 32.109 ctr 0.000) | q_nnz 216.2 (teacher 298.0) | flops 66.6 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  39600 | loss 27.6434 (rank 27.577 ctr 0.000) | q_nnz 211.5 (teacher 244.8) | flops 66.7 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 9s
+[lion-shallow/full] step  39800 | loss 31.9632 (rank 31.903 ctr 0.000) | q_nnz 197.2 (teacher 236.2) | flops 60.2 | p@1 s=1.00 t=1.00 | lr 1.96e-04 | 8s
+[lion-shallow/full] step  40000 | loss 29.5491 (rank 29.483 ctr 0.000) | q_nnz 222.5 (teacher 277.8) | flops 66.2 | p@1 s=0.25 t=0.50 | lr 1.96e-04 | 16s
+  Saved → checkpoints_lion_shallow/lion_shallow_last4/align_step_40000.pt
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.6724
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.3073
+  New best NanoMSMARCO query_doc NDCG@10=0.6724 → checkpoints_lion_shallow/lion_shallow_last4/best_NanoMSMARCO.pt
+[lion-shallow/full] step  40200 | loss 29.1390 (rank 29.073 ctr 0.000) | q_nnz 221.0 (teacher 325.2) | flops 66.1 | p@1 s=0.75 t=0.75 | lr 1.95e-04 | 142s
+[lion-shallow/full] step  40400 | loss 26.9237 (rank 26.860 ctr 0.000) | q_nnz 220.2 (teacher 280.0) | flops 64.2 | p@1 s=1.00 t=0.75 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  40600 | loss 29.8294 (rank 29.766 ctr 0.000) | q_nnz 207.5 (teacher 273.5) | flops 63.1 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  40800 | loss 28.2442 (rank 28.180 ctr 0.000) | q_nnz 220.0 (teacher 314.0) | flops 63.9 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  41000 | loss 29.3703 (rank 29.308 ctr 0.000) | q_nnz 208.2 (teacher 269.0) | flops 61.8 | p@1 s=0.50 t=0.75 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  41200 | loss 29.1118 (rank 29.054 ctr 0.000) | q_nnz 207.2 (teacher 308.2) | flops 57.5 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  41400 | loss 31.0544 (rank 30.996 ctr 0.000) | q_nnz 196.2 (teacher 282.8) | flops 58.3 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  41600 | loss 29.1051 (rank 29.045 ctr 0.000) | q_nnz 210.0 (teacher 302.0) | flops 60.1 | p@1 s=0.75 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  41800 | loss 29.7886 (rank 29.724 ctr 0.000) | q_nnz 201.2 (teacher 288.8) | flops 64.4 | p@1 s=0.75 t=0.75 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  42000 | loss 27.1345 (rank 27.072 ctr 0.000) | q_nnz 210.5 (teacher 289.8) | flops 62.7 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  42200 | loss 28.6216 (rank 28.563 ctr 0.000) | q_nnz 196.2 (teacher 320.0) | flops 59.0 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  42400 | loss 29.8645 (rank 29.795 ctr 0.000) | q_nnz 231.8 (teacher 290.2) | flops 69.1 | p@1 s=1.00 t=0.75 | lr 1.95e-04 | 16s
+[lion-shallow/full] step  42600 | loss 27.3614 (rank 27.296 ctr 0.000) | q_nnz 223.8 (teacher 318.2) | flops 65.3 | p@1 s=0.75 t=0.75 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  42800 | loss 29.6368 (rank 29.575 ctr 0.000) | q_nnz 204.5 (teacher 319.5) | flops 62.2 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  43000 | loss 27.5960 (rank 27.530 ctr 0.000) | q_nnz 218.8 (teacher 312.8) | flops 65.7 | p@1 s=0.50 t=0.50 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  43200 | loss 27.1192 (rank 27.062 ctr 0.000) | q_nnz 210.2 (teacher 265.2) | flops 57.4 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  43400 | loss 29.2307 (rank 29.156 ctr 0.000) | q_nnz 259.0 (teacher 341.8) | flops 74.4 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  43600 | loss 28.3385 (rank 28.273 ctr 0.000) | q_nnz 223.5 (teacher 316.2) | flops 65.7 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  43800 | loss 27.2008 (rank 27.132 ctr 0.000) | q_nnz 228.5 (teacher 306.5) | flops 69.2 | p@1 s=1.00 t=1.00 | lr 1.95e-04 | 8s
+[lion-shallow/full] step  44000 | loss 26.9019 (rank 26.832 ctr 0.000) | q_nnz 235.0 (teacher 273.8) | flops 69.7 | p@1 s=0.75 t=0.75 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  44200 | loss 29.0689 (rank 28.999 ctr 0.000) | q_nnz 226.5 (teacher 255.2) | flops 69.7 | p@1 s=0.75 t=0.75 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  44400 | loss 31.3254 (rank 31.262 ctr 0.000) | q_nnz 213.0 (teacher 309.5) | flops 63.7 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  44600 | loss 26.8507 (rank 26.787 ctr 0.000) | q_nnz 218.8 (teacher 304.5) | flops 63.6 | p@1 s=0.75 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  44800 | loss 29.8757 (rank 29.813 ctr 0.000) | q_nnz 213.5 (teacher 361.2) | flops 62.6 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  45000 | loss 27.3453 (rank 27.278 ctr 0.000) | q_nnz 227.2 (teacher 262.8) | flops 67.2 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 15s
+[lion-shallow/full] step  45200 | loss 30.0880 (rank 30.024 ctr 0.000) | q_nnz 210.2 (teacher 222.8) | flops 64.3 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  45400 | loss 28.1257 (rank 28.069 ctr 0.000) | q_nnz 197.5 (teacher 297.5) | flops 56.4 | p@1 s=0.75 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  45600 | loss 32.0420 (rank 31.972 ctr 0.000) | q_nnz 230.2 (teacher 319.5) | flops 69.6 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  45800 | loss 27.5794 (rank 27.518 ctr 0.000) | q_nnz 208.2 (teacher 225.5) | flops 61.4 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  46000 | loss 29.8341 (rank 29.767 ctr 0.000) | q_nnz 223.8 (teacher 272.0) | flops 66.7 | p@1 s=0.75 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  46200 | loss 30.2148 (rank 30.155 ctr 0.000) | q_nnz 191.8 (teacher 219.8) | flops 59.8 | p@1 s=0.50 t=0.75 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  46400 | loss 30.0266 (rank 29.965 ctr 0.000) | q_nnz 221.5 (teacher 338.0) | flops 62.1 | p@1 s=0.75 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  46600 | loss 28.8671 (rank 28.801 ctr 0.000) | q_nnz 213.8 (teacher 274.8) | flops 65.9 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  46800 | loss 30.8422 (rank 30.773 ctr 0.000) | q_nnz 234.5 (teacher 308.8) | flops 68.9 | p@1 s=0.75 t=0.75 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  47000 | loss 30.9412 (rank 30.863 ctr 0.000) | q_nnz 245.5 (teacher 245.8) | flops 78.5 | p@1 s=1.00 t=1.00 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  47200 | loss 29.3257 (rank 29.259 ctr 0.000) | q_nnz 228.2 (teacher 246.5) | flops 67.1 | p@1 s=0.50 t=0.50 | lr 1.94e-04 | 8s
+[lion-shallow/full] step  47400 | loss 29.1473 (rank 29.086 ctr 0.000) | q_nnz 216.0 (teacher 298.2) | flops 61.1 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 16s
+[lion-shallow/full] step  47600 | loss 27.8216 (rank 27.757 ctr 0.000) | q_nnz 224.5 (teacher 266.2) | flops 64.3 | p@1 s=0.75 t=0.75 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  47800 | loss 29.7314 (rank 29.666 ctr 0.000) | q_nnz 214.5 (teacher 266.2) | flops 65.3 | p@1 s=0.75 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  48000 | loss 29.7750 (rank 29.710 ctr 0.000) | q_nnz 222.8 (teacher 280.0) | flops 64.8 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  48200 | loss 28.7247 (rank 28.658 ctr 0.000) | q_nnz 218.0 (teacher 270.2) | flops 66.6 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  48400 | loss 30.8533 (rank 30.785 ctr 0.000) | q_nnz 224.0 (teacher 285.0) | flops 68.0 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  48600 | loss 31.3852 (rank 31.320 ctr 0.000) | q_nnz 213.5 (teacher 246.5) | flops 65.2 | p@1 s=0.75 t=0.75 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  48800 | loss 28.6506 (rank 28.588 ctr 0.000) | q_nnz 208.2 (teacher 241.2) | flops 62.2 | p@1 s=0.75 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  49000 | loss 28.6776 (rank 28.608 ctr 0.000) | q_nnz 235.5 (teacher 320.0) | flops 69.3 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  49200 | loss 30.3653 (rank 30.300 ctr 0.000) | q_nnz 218.5 (teacher 298.8) | flops 65.7 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  49400 | loss 29.7533 (rank 29.693 ctr 0.000) | q_nnz 196.8 (teacher 282.5) | flops 60.3 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  49600 | loss 29.1866 (rank 29.114 ctr 0.000) | q_nnz 226.8 (teacher 214.5) | flops 72.5 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 9s
+[lion-shallow/full] step  49800 | loss 27.8424 (rank 27.777 ctr 0.000) | q_nnz 215.2 (teacher 273.2) | flops 65.4 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 8s
+[lion-shallow/full] step  50000 | loss 27.1259 (rank 27.057 ctr 0.000) | q_nnz 224.5 (teacher 301.8) | flops 68.7 | p@1 s=1.00 t=1.00 | lr 1.93e-04 | 16s
+  Saved → checkpoints_lion_shallow/lion_shallow_last4/align_step_50000.pt
+  [NanoMSMARCO] loading …
+  [NanoMSMARCO] encoding 5043 docs (doc_splade) …
+  [NanoMSMARCO] encoding 50 queries (query_model, dense) …
+  [NanoMSMARCO] NDCG@10  query_doc (dense)  : 0.6780
+  [NanoNFCorpus] loading …
+  [NanoNFCorpus] encoding 2953 docs (doc_splade) …
+  [NanoNFCorpus] encoding 50 queries (query_model, dense) …
+  [NanoNFCorpus] NDCG@10  query_doc (dense)  : 0.3081
+  New best NanoMSMARCO query_doc NDCG@10=0.6780 → checkpoints_lion_shallow/lion_shallow_last4/best_NanoMSMARCO.pt
+[lion-shallow] Done. Final checkpoint → checkpoints_lion_shallow/lion_shallow_last4/align_final.pt

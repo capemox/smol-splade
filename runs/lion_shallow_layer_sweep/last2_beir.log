@@ -1,0 +1,150 @@
+Device: cuda
+Loading frozen Lion doc encoder: hzeng/Lion-SP-1B-llama3-marco-mntp ...
+[FrozenLionSPLADE] Loading hzeng/Lion-SP-1B-llama3-marco-mntp …
+[FrozenLionSPLADE] Base model: meta-llama/Llama-3.2-1B
+
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]
+Loading weights:  71%|███████   | 103/146 [00:00<00:00, 1008.94it/s]
+Loading weights: 100%|██████████| 146/146 [00:00<00:00, 1075.05it/s]
+Loading ShallowLionQuery (2 layers) from /home/capemox/projects/sae-smo-splade/checkpoints_lion_shallow/lion_shallow_last2/best_NanoMSMARCO.pt ...
+[ShallowLionQuery] Base: meta-llama/Llama-3.2-1B
+
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 146/146 [00:00<00:00, 9084.37it/s]
+  Step: 40000
+
+────────────────────────────────────────────────────────────
+[nfcorpus]
+  Loading queries and qrels ...
+  323 queries, 323 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/323
+  queries: 128/323
+  queries: 192/323
+  queries: 256/323
+  queries: 320/323
+  queries: 323/323
+  Retrieving from pre-built index (3,633 docs) ...
+
+  scoring:   0%|          | 0.00/3.63k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 3.63k/3.63k [00:00<00:00, 16.8kdoc/s]
+  scoring: 100%|██████████| 3.63k/3.63k [00:00<00:00, 16.8kdoc/s]
+  NDCG@10: 0.2834  MRR@10: 0.4662  [index (3,633 docs)]
+
+────────────────────────────────────────────────────────────
+[scifact]
+  Loading queries and qrels ...
+  300 queries, 300 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/300
+  queries: 128/300
+  queries: 192/300
+  queries: 256/300
+  queries: 300/300
+  Retrieving from pre-built index (5,183 docs) ...
+
+  scoring:   0%|          | 0.00/5.18k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 5.18k/5.18k [00:00<00:00, 35.3kdoc/s]
+  scoring: 100%|██████████| 5.18k/5.18k [00:00<00:00, 35.2kdoc/s]
+  NDCG@10: 0.5537  MRR@10: 0.5213  [index (5,183 docs)]
+
+────────────────────────────────────────────────────────────
+[arguana]
+  Loading queries and qrels ...
+  1406 queries, 1406 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1406
+  queries: 128/1406
+  queries: 192/1406
+  queries: 256/1406
+  queries: 320/1406
+  queries: 384/1406
+  queries: 448/1406
+  queries: 512/1406
+  queries: 576/1406
+  queries: 640/1406
+  queries: 704/1406
+  queries: 768/1406
+  queries: 832/1406
+  queries: 896/1406
+  queries: 960/1406
+  queries: 1024/1406
+  queries: 1088/1406
+  queries: 1152/1406
+  queries: 1216/1406
+  queries: 1280/1406
+  queries: 1344/1406
+  queries: 1406/1406
+  Retrieving from pre-built index (8,674 docs) ...
+
+  scoring:   0%|          | 0.00/8.67k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 8.67k/8.67k [00:00<00:00, 27.5kdoc/s]
+  scoring: 100%|██████████| 8.67k/8.67k [00:00<00:00, 27.5kdoc/s]
+  NDCG@10: 0.2735  MRR@10: 0.1830  [index (8,674 docs)]
+
+────────────────────────────────────────────────────────────
+[scidocs]
+  Loading queries and qrels ...
+  1000 queries, 1000 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1000
+  queries: 128/1000
+  queries: 192/1000
+  queries: 256/1000
+  queries: 320/1000
+  queries: 384/1000
+  queries: 448/1000
+  queries: 512/1000
+  queries: 576/1000
+  queries: 640/1000
+  queries: 704/1000
+  queries: 768/1000
+  queries: 832/1000
+  queries: 896/1000
+  queries: 960/1000
+  queries: 1000/1000
+  Retrieving from pre-built index (25,657 docs) ...
+
+  scoring:   0%|          | 0.00/25.7k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 25.7k/25.7k [00:00<00:00, 31.1kdoc/s]
+  scoring: 100%|██████████| 25.7k/25.7k [00:00<00:00, 31.1kdoc/s]
+  NDCG@10: 0.1210  MRR@10: 0.2207  [index (25,657 docs)]
+
+────────────────────────────────────────────────────────────
+[fiqa]
+  Loading queries and qrels ...
+  648 queries, 648 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/648
+  queries: 128/648
+  queries: 192/648
+  queries: 256/648
+  queries: 320/648
+  queries: 384/648
+  queries: 448/648
+  queries: 512/648
+  queries: 576/648
+  queries: 640/648
+  queries: 648/648
+  Retrieving from pre-built index (57,638 docs) ...
+
+  scoring:   0%|          | 0.00/57.6k [00:00<?, ?doc/s]
+  scoring:  87%|████████▋ | 50.0k/57.6k [00:01<00:00, 27.4kdoc/s]
+  scoring: 100%|██████████| 57.6k/57.6k [00:02<00:00, 29.0kdoc/s]
+  scoring: 100%|██████████| 57.6k/57.6k [00:02<00:00, 28.6kdoc/s]
+  NDCG@10: 0.2587  MRR@10: 0.3170  [index (57,638 docs)]
+
+============================================================
+Checkpoint : /home/capemox/projects/sae-smo-splade/checkpoints_lion_shallow/lion_shallow_last2/best_NanoMSMARCO.pt
+Stage      : lion_shallow
+────────────────────────────────────────────────────────────
+Dataset                 NDCG@10     MRR@10
+──────────────────────────────────────────
+nfcorpus                 0.2834     0.4662
+scifact                  0.5537     0.5213
+arguana                  0.2735     0.1830
+scidocs                  0.1210     0.2207
+fiqa                     0.2587     0.3170
+──────────────────────────────────────────
+Average                  0.2981     0.3416
+============================================================

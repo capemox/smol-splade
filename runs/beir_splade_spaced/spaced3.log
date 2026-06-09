@@ -1,0 +1,1223 @@
+Device: cuda
+Loading frozen doc SPLADE: naver/splade-v3 ...
+
+Loading weights:   0%|          | 0/204 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 204/204 [00:00<00:00, 39247.65it/s]
+Loading ShallowSpladeQuery (3 layers) from checkpoints_splade-v3/splade_shallow_spaced3/best_NanoMSMARCO.pt ...
+
+Loading weights:   0%|          | 0/204 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 204/204 [00:00<00:00, 12995.52it/s]
+  Step: 50000
+
+────────────────────────────────────────────────────────────
+[nfcorpus]
+  Loading queries and qrels ...
+Exception in thread Thread-auto_conversion:
+Traceback (most recent call last):
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+    self.run()
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 953, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 117, in auto_conversion
+    raise e
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 96, in auto_conversion
+    sha = get_conversion_pr_reference(api, pretrained_model_name_or_path, **cached_file_kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 77, in get_conversion_pr_reference
+    raise OSError(
+OSError: Could not create safetensors conversion PR. The repo does not appear to have a file named pytorch_model.bin or model.safetensors.If you are loading with variant, use `use_safetensors=False` to load the original model.
+Exception in thread Thread-auto_conversion:
+Traceback (most recent call last):
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+    self.run()
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 953, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 117, in auto_conversion
+    raise e
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 96, in auto_conversion
+    sha = get_conversion_pr_reference(api, pretrained_model_name_or_path, **cached_file_kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 77, in get_conversion_pr_reference
+    raise OSError(
+OSError: Could not create safetensors conversion PR. The repo does not appear to have a file named pytorch_model.bin or model.safetensors.If you are loading with variant, use `use_safetensors=False` to load the original model.
+  323 queries, 323 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/323
+  queries: 128/323
+  queries: 192/323
+  queries: 256/323
+  queries: 320/323
+  queries: 323/323
+  Retrieving from pre-built index (3,633 docs) ...
+
+  scoring:   0%|          | 0.00/3.63k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 3.63k/3.63k [00:00<00:00, 24.3kdoc/s]
+  scoring: 100%|██████████| 3.63k/3.63k [00:00<00:00, 24.2kdoc/s]
+  NDCG@10: 0.3326  MRR@10: 0.5517  [index (3,633 docs)]
+
+────────────────────────────────────────────────────────────
+[scifact]
+  Loading queries and qrels ...
+  300 queries, 300 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/300
+  queries: 128/300
+  queries: 192/300
+  queries: 256/300
+  queries: 300/300
+  Retrieving from pre-built index (5,183 docs) ...
+
+  scoring:   0%|          | 0.00/5.18k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 5.18k/5.18k [00:00<00:00, 140kdoc/s]
+  NDCG@10: 0.6297  MRR@10: 0.6023  [index (5,183 docs)]
+
+────────────────────────────────────────────────────────────
+[arguana]
+  Loading queries and qrels ...
+  1406 queries, 1406 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1406
+  queries: 128/1406
+  queries: 192/1406
+  queries: 256/1406
+  queries: 320/1406
+  queries: 384/1406
+  queries: 448/1406
+  queries: 512/1406
+  queries: 576/1406
+  queries: 640/1406
+  queries: 704/1406
+  queries: 768/1406
+  queries: 832/1406
+  queries: 896/1406
+  queries: 960/1406
+  queries: 1024/1406
+  queries: 1088/1406
+  queries: 1152/1406
+  queries: 1216/1406
+  queries: 1280/1406
+  queries: 1344/1406
+  queries: 1406/1406
+  Retrieving from pre-built index (8,674 docs) ...
+
+  scoring:   0%|          | 0.00/8.67k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 8.67k/8.67k [00:00<00:00, 61.4kdoc/s]
+  scoring: 100%|██████████| 8.67k/8.67k [00:00<00:00, 61.3kdoc/s]
+  NDCG@10: 0.3206  MRR@10: 0.2155  [index (8,674 docs)]
+
+────────────────────────────────────────────────────────────
+[scidocs]
+  Loading queries and qrels ...
+  1000 queries, 1000 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1000
+  queries: 128/1000
+  queries: 192/1000
+  queries: 256/1000
+  queries: 320/1000
+  queries: 384/1000
+  queries: 448/1000
+  queries: 512/1000
+  queries: 576/1000
+  queries: 640/1000
+  queries: 704/1000
+  queries: 768/1000
+  queries: 832/1000
+  queries: 896/1000
+  queries: 960/1000
+  queries: 1000/1000
+  Retrieving from pre-built index (25,657 docs) ...
+
+  scoring:   0%|          | 0.00/25.7k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 25.7k/25.7k [00:00<00:00, 100kdoc/s]
+  scoring: 100%|██████████| 25.7k/25.7k [00:00<00:00, 100kdoc/s]
+  NDCG@10: 0.1541  MRR@10: 0.2719  [index (25,657 docs)]
+
+────────────────────────────────────────────────────────────
+[fiqa]
+  Loading queries and qrels ...
+  648 queries, 648 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/648
+  queries: 128/648
+  queries: 192/648
+  queries: 256/648
+  queries: 320/648
+  queries: 384/648
+  queries: 448/648
+  queries: 512/648
+  queries: 576/648
+  queries: 640/648
+  queries: 648/648
+  Retrieving from pre-built index (57,638 docs) ...
+
+  scoring:   0%|          | 0.00/57.6k [00:00<?, ?doc/s]
+  scoring:  87%|████████▋ | 50.0k/57.6k [00:00<00:00, 107kdoc/s]
+  scoring: 100%|██████████| 57.6k/57.6k [00:00<00:00, 111kdoc/s]
+  NDCG@10: 0.3183  MRR@10: 0.3938  [index (57,638 docs)]
+
+────────────────────────────────────────────────────────────
+[trec-covid]
+  Loading queries and qrels ...
+  50 queries, 50 with relevance judgments
+  Encoding queries with query model ...
+  queries: 50/50
+  Retrieving from pre-built index (171,332 docs) ...
+
+  scoring:   0%|          | 0.00/171k [00:00<?, ?doc/s]
+  scoring:  29%|██▉       | 50.0k/171k [00:00<00:00, 195kdoc/s]
+  scoring:  58%|█████▊    | 100k/171k [00:00<00:00, 210kdoc/s] 
+  scoring:  88%|████████▊ | 150k/171k [00:00<00:00, 227kdoc/s]
+  scoring: 100%|██████████| 171k/171k [00:00<00:00, 221kdoc/s]
+  NDCG@10: 0.7172  MRR@10: 0.9025  [index (171,332 docs)]
+
+────────────────────────────────────────────────────────────
+[webis-touche2020]
+  Loading queries and qrels ...
+  49 queries, 49 with relevance judgments
+  Encoding queries with query model ...
+  queries: 49/49
+  Retrieving from pre-built index (382,545 docs) ...
+
+  scoring:   0%|          | 0.00/383k [00:00<?, ?doc/s]
+  scoring:  13%|█▎        | 50.0k/383k [00:00<00:01, 222kdoc/s]
+  scoring:  26%|██▌       | 100k/383k [00:00<00:01, 205kdoc/s] 
+  scoring:  39%|███▉      | 150k/383k [00:00<00:01, 210kdoc/s]
+  scoring:  52%|█████▏    | 200k/383k [00:00<00:00, 213kdoc/s]
+  scoring:  65%|██████▌   | 250k/383k [00:01<00:00, 213kdoc/s]
+  scoring:  78%|███████▊  | 300k/383k [00:01<00:00, 215kdoc/s]
+  scoring:  91%|█████████▏| 350k/383k [00:01<00:00, 216kdoc/s]
+  scoring: 100%|██████████| 383k/383k [00:01<00:00, 220kdoc/s]
+  scoring: 100%|██████████| 383k/383k [00:01<00:00, 216kdoc/s]
+  NDCG@10: 0.2901  MRR@10: 0.5458  [index (382,545 docs)]
+
+────────────────────────────────────────────────────────────
+[quora]
+  Loading queries and qrels ...
+  10000 queries, 10000 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/10000
+  queries: 128/10000
+  queries: 192/10000
+  queries: 256/10000
+  queries: 320/10000
+  queries: 384/10000
+  queries: 448/10000
+  queries: 512/10000
+  queries: 576/10000
+  queries: 640/10000
+  queries: 704/10000
+  queries: 768/10000
+  queries: 832/10000
+  queries: 896/10000
+  queries: 960/10000
+  queries: 1024/10000
+  queries: 1088/10000
+  queries: 1152/10000
+  queries: 1216/10000
+  queries: 1280/10000
+  queries: 1344/10000
+  queries: 1408/10000
+  queries: 1472/10000
+  queries: 1536/10000
+  queries: 1600/10000
+  queries: 1664/10000
+  queries: 1728/10000
+  queries: 1792/10000
+  queries: 1856/10000
+  queries: 1920/10000
+  queries: 1984/10000
+  queries: 2048/10000
+  queries: 2112/10000
+  queries: 2176/10000
+  queries: 2240/10000
+  queries: 2304/10000
+  queries: 2368/10000
+  queries: 2432/10000
+  queries: 2496/10000
+  queries: 2560/10000
+  queries: 2624/10000
+  queries: 2688/10000
+  queries: 2752/10000
+  queries: 2816/10000
+  queries: 2880/10000
+  queries: 2944/10000
+  queries: 3008/10000
+  queries: 3072/10000
+  queries: 3136/10000
+  queries: 3200/10000
+  queries: 3264/10000
+  queries: 3328/10000
+  queries: 3392/10000
+  queries: 3456/10000
+  queries: 3520/10000
+  queries: 3584/10000
+  queries: 3648/10000
+  queries: 3712/10000
+  queries: 3776/10000
+  queries: 3840/10000
+  queries: 3904/10000
+  queries: 3968/10000
+  queries: 4032/10000
+  queries: 4096/10000
+  queries: 4160/10000
+  queries: 4224/10000
+  queries: 4288/10000
+  queries: 4352/10000
+  queries: 4416/10000
+  queries: 4480/10000
+  queries: 4544/10000
+  queries: 4608/10000
+  queries: 4672/10000
+  queries: 4736/10000
+  queries: 4800/10000
+  queries: 4864/10000
+  queries: 4928/10000
+  queries: 4992/10000
+  queries: 5056/10000
+  queries: 5120/10000
+  queries: 5184/10000
+  queries: 5248/10000
+  queries: 5312/10000
+  queries: 5376/10000
+  queries: 5440/10000
+  queries: 5504/10000
+  queries: 5568/10000
+  queries: 5632/10000
+  queries: 5696/10000
+  queries: 5760/10000
+  queries: 5824/10000
+  queries: 5888/10000
+  queries: 5952/10000
+  queries: 6016/10000
+  queries: 6080/10000
+  queries: 6144/10000
+  queries: 6208/10000
+  queries: 6272/10000
+  queries: 6336/10000
+  queries: 6400/10000
+  queries: 6464/10000
+  queries: 6528/10000
+  queries: 6592/10000
+  queries: 6656/10000
+  queries: 6720/10000
+  queries: 6784/10000
+  queries: 6848/10000
+  queries: 6912/10000
+  queries: 6976/10000
+  queries: 7040/10000
+  queries: 7104/10000
+  queries: 7168/10000
+  queries: 7232/10000
+  queries: 7296/10000
+  queries: 7360/10000
+  queries: 7424/10000
+  queries: 7488/10000
+  queries: 7552/10000
+  queries: 7616/10000
+  queries: 7680/10000
+  queries: 7744/10000
+  queries: 7808/10000
+  queries: 7872/10000
+  queries: 7936/10000
+  queries: 8000/10000
+  queries: 8064/10000
+  queries: 8128/10000
+  queries: 8192/10000
+  queries: 8256/10000
+  queries: 8320/10000
+  queries: 8384/10000
+  queries: 8448/10000
+  queries: 8512/10000
+  queries: 8576/10000
+  queries: 8640/10000
+  queries: 8704/10000
+  queries: 8768/10000
+  queries: 8832/10000
+  queries: 8896/10000
+  queries: 8960/10000
+  queries: 9024/10000
+  queries: 9088/10000
+  queries: 9152/10000
+  queries: 9216/10000
+  queries: 9280/10000
+  queries: 9344/10000
+  queries: 9408/10000
+  queries: 9472/10000
+  queries: 9536/10000
+  queries: 9600/10000
+  queries: 9664/10000
+  queries: 9728/10000
+  queries: 9792/10000
+  queries: 9856/10000
+  queries: 9920/10000
+  queries: 9984/10000
+  queries: 10000/10000
+  Retrieving from pre-built index (522,931 docs) ...
+
+  scoring:   0%|          | 0.00/523k [00:00<?, ?doc/s]
+  scoring:  10%|▉         | 50.0k/523k [00:03<00:32, 14.8kdoc/s]
+  scoring:  19%|█▉        | 100k/523k [00:06<00:28, 14.9kdoc/s] 
+  scoring:  29%|██▊       | 150k/523k [00:10<00:24, 15.1kdoc/s]
+  scoring:  38%|███▊      | 200k/523k [00:13<00:21, 15.1kdoc/s]
+  scoring:  48%|████▊     | 250k/523k [00:16<00:18, 15.1kdoc/s]
+  scoring:  57%|█████▋    | 300k/523k [00:19<00:14, 15.1kdoc/s]
+  scoring:  67%|██████▋   | 350k/523k [00:23<00:11, 15.3kdoc/s]
+  scoring:  76%|███████▋  | 400k/523k [00:26<00:08, 15.3kdoc/s]
+  scoring:  86%|████████▌ | 450k/523k [00:29<00:04, 15.2kdoc/s]
+  scoring:  96%|█████████▌| 500k/523k [00:32<00:01, 15.3kdoc/s]
+  scoring: 100%|██████████| 523k/523k [00:34<00:00, 15.4kdoc/s]
+  scoring: 100%|██████████| 523k/523k [00:34<00:00, 15.2kdoc/s]
+  NDCG@10: 0.7738  MRR@10: 0.7546  [index (522,931 docs)]
+
+────────────────────────────────────────────────────────────
+[nq]
+  Loading queries and qrels ...
+  3452 queries, 3452 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/3452
+  queries: 128/3452
+  queries: 192/3452
+  queries: 256/3452
+  queries: 320/3452
+  queries: 384/3452
+  queries: 448/3452
+  queries: 512/3452
+  queries: 576/3452
+  queries: 640/3452
+  queries: 704/3452
+  queries: 768/3452
+  queries: 832/3452
+  queries: 896/3452
+  queries: 960/3452
+  queries: 1024/3452
+  queries: 1088/3452
+  queries: 1152/3452
+  queries: 1216/3452
+  queries: 1280/3452
+  queries: 1344/3452
+  queries: 1408/3452
+  queries: 1472/3452
+  queries: 1536/3452
+  queries: 1600/3452
+  queries: 1664/3452
+  queries: 1728/3452
+  queries: 1792/3452
+  queries: 1856/3452
+  queries: 1920/3452
+  queries: 1984/3452
+  queries: 2048/3452
+  queries: 2112/3452
+  queries: 2176/3452
+  queries: 2240/3452
+  queries: 2304/3452
+  queries: 2368/3452
+  queries: 2432/3452
+  queries: 2496/3452
+  queries: 2560/3452
+  queries: 2624/3452
+  queries: 2688/3452
+  queries: 2752/3452
+  queries: 2816/3452
+  queries: 2880/3452
+  queries: 2944/3452
+  queries: 3008/3452
+  queries: 3072/3452
+  queries: 3136/3452
+  queries: 3200/3452
+  queries: 3264/3452
+  queries: 3328/3452
+  queries: 3392/3452
+  queries: 3452/3452
+  Retrieving from pre-built index (2,681,468 docs) ...
+
+  scoring:   0%|          | 0.00/2.68M [00:00<?, ?doc/s]
+  scoring:   2%|▏         | 50.0k/2.68M [00:01<01:08, 38.7kdoc/s]
+  scoring:   4%|▎         | 100k/2.68M [00:02<01:06, 38.7kdoc/s] 
+  scoring:   6%|▌         | 150k/2.68M [00:03<01:06, 38.0kdoc/s]
+  scoring:   7%|▋         | 200k/2.68M [00:05<01:03, 39.1kdoc/s]
+  scoring:   9%|▉         | 250k/2.68M [00:06<01:02, 38.6kdoc/s]
+  scoring:  11%|█         | 300k/2.68M [00:07<01:00, 39.2kdoc/s]
+  scoring:  13%|█▎        | 350k/2.68M [00:09<01:00, 38.8kdoc/s]
+  scoring:  15%|█▍        | 400k/2.68M [00:10<00:58, 39.1kdoc/s]
+  scoring:  17%|█▋        | 450k/2.68M [00:11<00:57, 39.0kdoc/s]
+  scoring:  19%|█▊        | 500k/2.68M [00:12<00:54, 40.1kdoc/s]
+  scoring:  21%|██        | 550k/2.68M [00:14<00:53, 39.7kdoc/s]
+  scoring:  22%|██▏       | 600k/2.68M [00:15<00:51, 40.2kdoc/s]
+  scoring:  24%|██▍       | 650k/2.68M [00:16<00:51, 39.7kdoc/s]
+  scoring:  26%|██▌       | 700k/2.68M [00:17<00:50, 39.5kdoc/s]
+  scoring:  28%|██▊       | 750k/2.68M [00:19<00:49, 39.2kdoc/s]
+  scoring:  30%|██▉       | 800k/2.68M [00:20<00:47, 39.5kdoc/s]
+  scoring:  32%|███▏      | 850k/2.68M [00:21<00:46, 39.3kdoc/s]
+  scoring:  34%|███▎      | 900k/2.68M [00:22<00:45, 38.8kdoc/s]
+  scoring:  35%|███▌      | 950k/2.68M [00:24<00:43, 39.5kdoc/s]
+  scoring:  37%|███▋      | 1.00M/2.68M [00:25<00:43, 38.8kdoc/s]
+  scoring:  39%|███▉      | 1.05M/2.68M [00:26<00:41, 38.9kdoc/s]
+  scoring:  41%|████      | 1.10M/2.68M [00:28<00:40, 38.6kdoc/s]
+  scoring:  43%|████▎     | 1.15M/2.68M [00:29<00:39, 39.0kdoc/s]
+  scoring:  45%|████▍     | 1.20M/2.68M [00:30<00:38, 38.6kdoc/s]
+  scoring:  47%|████▋     | 1.25M/2.68M [00:31<00:36, 39.0kdoc/s]
+  scoring:  48%|████▊     | 1.30M/2.68M [00:33<00:35, 38.5kdoc/s]
+  scoring:  50%|█████     | 1.35M/2.68M [00:34<00:34, 38.8kdoc/s]
+  scoring:  52%|█████▏    | 1.40M/2.68M [00:35<00:32, 38.9kdoc/s]
+  scoring:  54%|█████▍    | 1.45M/2.68M [00:37<00:31, 39.0kdoc/s]
+  scoring:  56%|█████▌    | 1.50M/2.68M [00:38<00:30, 38.3kdoc/s]
+  scoring:  58%|█████▊    | 1.55M/2.68M [00:39<00:29, 38.2kdoc/s]
+  scoring:  60%|█████▉    | 1.60M/2.68M [00:41<00:27, 38.7kdoc/s]
+  scoring:  62%|██████▏   | 1.65M/2.68M [00:42<00:26, 38.7kdoc/s]
+  scoring:  63%|██████▎   | 1.70M/2.68M [00:43<00:25, 38.7kdoc/s]
+  scoring:  65%|██████▌   | 1.75M/2.68M [00:44<00:23, 38.9kdoc/s]
+  scoring:  67%|██████▋   | 1.80M/2.68M [00:46<00:22, 39.4kdoc/s]
+  scoring:  69%|██████▉   | 1.85M/2.68M [00:47<00:21, 39.1kdoc/s]
+  scoring:  71%|███████   | 1.90M/2.68M [00:48<00:19, 39.6kdoc/s]
+  scoring:  73%|███████▎  | 1.95M/2.68M [00:49<00:18, 39.1kdoc/s]
+  scoring:  75%|███████▍  | 2.00M/2.68M [00:51<00:17, 39.8kdoc/s]
+  scoring:  76%|███████▋  | 2.05M/2.68M [00:52<00:16, 39.5kdoc/s]
+  scoring:  78%|███████▊  | 2.10M/2.68M [00:53<00:14, 39.8kdoc/s]
+  scoring:  80%|████████  | 2.15M/2.68M [00:54<00:13, 39.4kdoc/s]
+  scoring:  82%|████████▏ | 2.20M/2.68M [00:56<00:12, 39.4kdoc/s]
+  scoring:  84%|████████▍ | 2.25M/2.68M [00:57<00:10, 39.2kdoc/s]
+  scoring:  86%|████████▌ | 2.30M/2.68M [00:58<00:09, 39.0kdoc/s]
+  scoring:  88%|████████▊ | 2.35M/2.68M [01:00<00:08, 38.6kdoc/s]
+  scoring:  90%|████████▉ | 2.40M/2.68M [01:01<00:07, 38.2kdoc/s]
+  scoring:  91%|█████████▏| 2.45M/2.68M [01:02<00:05, 38.9kdoc/s]
+  scoring:  93%|█████████▎| 2.50M/2.68M [01:04<00:04, 38.9kdoc/s]
+  scoring:  95%|█████████▌| 2.55M/2.68M [01:05<00:03, 39.2kdoc/s]
+  scoring:  97%|█████████▋| 2.60M/2.68M [01:06<00:02, 39.4kdoc/s]
+  scoring:  99%|█████████▉| 2.65M/2.68M [01:07<00:00, 39.9kdoc/s]
+  scoring: 100%|██████████| 2.68M/2.68M [01:08<00:00, 40.2kdoc/s]
+  scoring: 100%|██████████| 2.68M/2.68M [01:08<00:00, 39.1kdoc/s]
+  NDCG@10: 0.5474  MRR@10: 0.4999  [index (2,681,468 docs)]
+
+────────────────────────────────────────────────────────────
+[dbpedia-entity]
+  Loading queries and qrels ...
+  400 queries, 400 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/400
+  queries: 128/400
+  queries: 192/400
+  queries: 256/400
+  queries: 320/400
+  queries: 384/400
+  queries: 400/400
+  Retrieving from pre-built index (4,635,922 docs) ...
+
+  scoring:   0%|          | 0.00/4.64M [00:00<?, ?doc/s]
+  scoring:   1%|          | 50.0k/4.64M [00:00<00:17, 258kdoc/s]
+  scoring:   2%|▏         | 100k/4.64M [00:00<00:16, 281kdoc/s] 
+  scoring:   3%|▎         | 150k/4.64M [00:00<00:17, 250kdoc/s]
+  scoring:   4%|▍         | 200k/4.64M [00:00<00:17, 247kdoc/s]
+  scoring:   5%|▌         | 250k/4.64M [00:01<00:18, 243kdoc/s]
+  scoring:   6%|▋         | 300k/4.64M [00:01<00:19, 228kdoc/s]
+  scoring:   8%|▊         | 350k/4.64M [00:02<00:40, 107kdoc/s]
+  scoring:   9%|▊         | 400k/4.64M [00:03<00:52, 80.1kdoc/s]
+  scoring:  10%|▉         | 450k/4.64M [00:04<01:00, 69.5kdoc/s]
+  scoring:  11%|█         | 500k/4.64M [00:05<01:04, 63.7kdoc/s]
+  scoring:  12%|█▏        | 550k/4.64M [00:06<01:08, 59.3kdoc/s]
+  scoring:  13%|█▎        | 600k/4.64M [00:07<01:12, 55.6kdoc/s]
+  scoring:  14%|█▍        | 650k/4.64M [00:08<01:13, 54.0kdoc/s]
+  scoring:  15%|█▌        | 700k/4.64M [00:09<01:13, 53.2kdoc/s]
+  scoring:  16%|█▌        | 750k/4.64M [00:10<01:14, 51.9kdoc/s]
+  scoring:  17%|█▋        | 800k/4.64M [00:10<01:13, 52.1kdoc/s]
+  scoring:  18%|█▊        | 850k/4.64M [00:11<01:11, 52.9kdoc/s]
+  scoring:  19%|█▉        | 900k/4.64M [00:12<01:10, 52.8kdoc/s]
+  scoring:  20%|██        | 950k/4.64M [00:13<01:09, 53.2kdoc/s]
+  scoring:  22%|██▏       | 1.00M/4.64M [00:14<01:07, 53.9kdoc/s]
+  scoring:  23%|██▎       | 1.05M/4.64M [00:15<01:07, 53.3kdoc/s]
+  scoring:  24%|██▎       | 1.10M/4.64M [00:16<01:06, 53.3kdoc/s]
+  scoring:  25%|██▍       | 1.15M/4.64M [00:17<01:05, 52.9kdoc/s]
+  scoring:  26%|██▌       | 1.20M/4.64M [00:18<01:05, 52.3kdoc/s]
+  scoring:  27%|██▋       | 1.25M/4.64M [00:19<01:05, 51.5kdoc/s]
+  scoring:  28%|██▊       | 1.30M/4.64M [00:20<01:04, 51.9kdoc/s]
+  scoring:  29%|██▉       | 1.35M/4.64M [00:21<01:02, 52.9kdoc/s]
+  scoring:  30%|███       | 1.40M/4.64M [00:22<01:01, 53.0kdoc/s]
+  scoring:  31%|███▏      | 1.45M/4.64M [00:23<00:59, 53.5kdoc/s]
+  scoring:  32%|███▏      | 1.50M/4.64M [00:24<00:58, 53.8kdoc/s]
+  scoring:  33%|███▎      | 1.55M/4.64M [00:25<00:57, 53.6kdoc/s]
+  scoring:  35%|███▍      | 1.60M/4.64M [00:26<00:56, 53.7kdoc/s]
+  scoring:  36%|███▌      | 1.65M/4.64M [00:26<00:54, 54.5kdoc/s]
+  scoring:  37%|███▋      | 1.70M/4.64M [00:27<00:54, 53.6kdoc/s]
+  scoring:  38%|███▊      | 1.75M/4.64M [00:28<00:54, 52.6kdoc/s]
+  scoring:  39%|███▉      | 1.80M/4.64M [00:29<00:48, 58.9kdoc/s]
+  scoring:  40%|███▉      | 1.85M/4.64M [00:30<00:47, 59.0kdoc/s]
+  scoring:  41%|████      | 1.90M/4.64M [00:31<00:46, 58.7kdoc/s]
+  scoring:  42%|████▏     | 1.95M/4.64M [00:32<00:46, 57.2kdoc/s]
+  scoring:  43%|████▎     | 2.00M/4.64M [00:33<00:46, 56.3kdoc/s]
+  scoring:  44%|████▍     | 2.05M/4.64M [00:33<00:45, 56.9kdoc/s]
+  scoring:  45%|████▌     | 2.10M/4.64M [00:34<00:43, 58.9kdoc/s]
+  scoring:  46%|████▋     | 2.15M/4.64M [00:35<00:42, 58.5kdoc/s]
+  scoring:  47%|████▋     | 2.20M/4.64M [00:36<00:42, 57.4kdoc/s]
+  scoring:  49%|████▊     | 2.25M/4.64M [00:37<00:41, 57.1kdoc/s]
+  scoring:  50%|████▉     | 2.30M/4.64M [00:38<00:41, 56.1kdoc/s]
+  scoring:  51%|█████     | 2.35M/4.64M [00:39<00:40, 55.8kdoc/s]
+  scoring:  52%|█████▏    | 2.40M/4.64M [00:39<00:39, 56.9kdoc/s]
+  scoring:  53%|█████▎    | 2.45M/4.64M [00:40<00:37, 57.7kdoc/s]
+  scoring:  54%|█████▍    | 2.50M/4.64M [00:41<00:37, 57.2kdoc/s]
+  scoring:  55%|█████▌    | 2.55M/4.64M [00:42<00:37, 56.2kdoc/s]
+  scoring:  56%|█████▌    | 2.60M/4.64M [00:43<00:36, 55.9kdoc/s]
+  scoring:  57%|█████▋    | 2.65M/4.64M [00:44<00:35, 55.8kdoc/s]
+  scoring:  58%|█████▊    | 2.70M/4.64M [00:45<00:33, 57.0kdoc/s]
+  scoring:  59%|█████▉    | 2.75M/4.64M [00:46<00:32, 57.7kdoc/s]
+  scoring:  60%|██████    | 2.80M/4.64M [00:46<00:31, 57.7kdoc/s]
+  scoring:  61%|██████▏   | 2.85M/4.64M [00:47<00:31, 56.4kdoc/s]
+  scoring:  63%|██████▎   | 2.90M/4.64M [00:48<00:30, 56.6kdoc/s]
+  scoring:  64%|██████▎   | 2.95M/4.64M [00:49<00:29, 56.6kdoc/s]
+  scoring:  65%|██████▍   | 3.00M/4.64M [00:50<00:29, 55.8kdoc/s]
+  scoring:  66%|██████▌   | 3.05M/4.64M [00:51<00:28, 56.0kdoc/s]
+  scoring:  67%|██████▋   | 3.10M/4.64M [00:52<00:26, 57.0kdoc/s]
+  scoring:  68%|██████▊   | 3.15M/4.64M [00:53<00:25, 57.5kdoc/s]
+  scoring:  69%|██████▉   | 3.20M/4.64M [00:54<00:24, 57.8kdoc/s]
+  scoring:  70%|███████   | 3.25M/4.64M [00:54<00:24, 57.4kdoc/s]
+  scoring:  71%|███████   | 3.30M/4.64M [00:55<00:23, 55.9kdoc/s]
+  scoring:  72%|███████▏  | 3.35M/4.64M [00:56<00:22, 56.5kdoc/s]
+  scoring:  73%|███████▎  | 3.40M/4.64M [00:57<00:21, 56.3kdoc/s]
+  scoring:  74%|███████▍  | 3.45M/4.64M [00:58<00:21, 56.4kdoc/s]
+  scoring:  75%|███████▌  | 3.50M/4.64M [00:59<00:20, 56.4kdoc/s]
+  scoring:  77%|███████▋  | 3.55M/4.64M [01:00<00:19, 56.3kdoc/s]
+  scoring:  78%|███████▊  | 3.60M/4.64M [01:01<00:18, 56.6kdoc/s]
+  scoring:  79%|███████▊  | 3.65M/4.64M [01:02<00:17, 56.7kdoc/s]
+  scoring:  80%|███████▉  | 3.70M/4.64M [01:02<00:16, 56.3kdoc/s]
+  scoring:  81%|████████  | 3.75M/4.64M [01:03<00:15, 56.6kdoc/s]
+  scoring:  82%|████████▏ | 3.80M/4.64M [01:04<00:14, 57.2kdoc/s]
+  scoring:  83%|████████▎ | 3.85M/4.64M [01:05<00:13, 57.5kdoc/s]
+  scoring:  84%|████████▍ | 3.90M/4.64M [01:06<00:12, 57.7kdoc/s]
+  scoring:  85%|████████▌ | 3.95M/4.64M [01:07<00:11, 58.3kdoc/s]
+  scoring:  86%|████████▋ | 4.00M/4.64M [01:08<00:10, 58.6kdoc/s]
+  scoring:  87%|████████▋ | 4.05M/4.64M [01:08<00:09, 58.9kdoc/s]
+  scoring:  88%|████████▊ | 4.10M/4.64M [01:09<00:09, 58.1kdoc/s]
+  scoring:  90%|████████▉ | 4.15M/4.64M [01:10<00:08, 56.8kdoc/s]
+  scoring:  91%|█████████ | 4.20M/4.64M [01:11<00:07, 56.3kdoc/s]
+  scoring:  92%|█████████▏| 4.25M/4.64M [01:12<00:06, 57.2kdoc/s]
+  scoring:  93%|█████████▎| 4.30M/4.64M [01:13<00:05, 57.9kdoc/s]
+  scoring:  94%|█████████▍| 4.35M/4.64M [01:14<00:04, 58.3kdoc/s]
+  scoring:  95%|█████████▍| 4.40M/4.64M [01:15<00:04, 57.2kdoc/s]
+  scoring:  96%|█████████▌| 4.45M/4.64M [01:15<00:03, 56.0kdoc/s]
+  scoring:  97%|█████████▋| 4.50M/4.64M [01:16<00:02, 56.3kdoc/s]
+  scoring:  98%|█████████▊| 4.55M/4.64M [01:17<00:01, 56.2kdoc/s]
+  scoring:  99%|█████████▉| 4.60M/4.64M [01:18<00:00, 57.2kdoc/s]
+  scoring: 100%|██████████| 4.64M/4.64M [01:19<00:00, 57.7kdoc/s]
+  scoring: 100%|██████████| 4.64M/4.64M [01:19<00:00, 58.5kdoc/s]
+  NDCG@10: 0.4233  MRR@10: 0.7246  [index (4,635,922 docs)]
+
+────────────────────────────────────────────────────────────
+[hotpotqa]
+  Loading queries and qrels ...
+  7405 queries, 7405 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/7405
+  queries: 128/7405
+  queries: 192/7405
+  queries: 256/7405
+  queries: 320/7405
+  queries: 384/7405
+  queries: 448/7405
+  queries: 512/7405
+  queries: 576/7405
+  queries: 640/7405
+  queries: 704/7405
+  queries: 768/7405
+  queries: 832/7405
+  queries: 896/7405
+  queries: 960/7405
+  queries: 1024/7405
+  queries: 1088/7405
+  queries: 1152/7405
+  queries: 1216/7405
+  queries: 1280/7405
+  queries: 1344/7405
+  queries: 1408/7405
+  queries: 1472/7405
+  queries: 1536/7405
+  queries: 1600/7405
+  queries: 1664/7405
+  queries: 1728/7405
+  queries: 1792/7405
+  queries: 1856/7405
+  queries: 1920/7405
+  queries: 1984/7405
+  queries: 2048/7405
+  queries: 2112/7405
+  queries: 2176/7405
+  queries: 2240/7405
+  queries: 2304/7405
+  queries: 2368/7405
+  queries: 2432/7405
+  queries: 2496/7405
+  queries: 2560/7405
+  queries: 2624/7405
+  queries: 2688/7405
+  queries: 2752/7405
+  queries: 2816/7405
+  queries: 2880/7405
+  queries: 2944/7405
+  queries: 3008/7405
+  queries: 3072/7405
+  queries: 3136/7405
+  queries: 3200/7405
+  queries: 3264/7405
+  queries: 3328/7405
+  queries: 3392/7405
+  queries: 3456/7405
+  queries: 3520/7405
+  queries: 3584/7405
+  queries: 3648/7405
+  queries: 3712/7405
+  queries: 3776/7405
+  queries: 3840/7405
+  queries: 3904/7405
+  queries: 3968/7405
+  queries: 4032/7405
+  queries: 4096/7405
+  queries: 4160/7405
+  queries: 4224/7405
+  queries: 4288/7405
+  queries: 4352/7405
+  queries: 4416/7405
+  queries: 4480/7405
+  queries: 4544/7405
+  queries: 4608/7405
+  queries: 4672/7405
+  queries: 4736/7405
+  queries: 4800/7405
+  queries: 4864/7405
+  queries: 4928/7405
+  queries: 4992/7405
+  queries: 5056/7405
+  queries: 5120/7405
+  queries: 5184/7405
+  queries: 5248/7405
+  queries: 5312/7405
+  queries: 5376/7405
+  queries: 5440/7405
+  queries: 5504/7405
+  queries: 5568/7405
+  queries: 5632/7405
+  queries: 5696/7405
+  queries: 5760/7405
+  queries: 5824/7405
+  queries: 5888/7405
+  queries: 5952/7405
+  queries: 6016/7405
+  queries: 6080/7405
+  queries: 6144/7405
+  queries: 6208/7405
+  queries: 6272/7405
+  queries: 6336/7405
+  queries: 6400/7405
+  queries: 6464/7405
+  queries: 6528/7405
+  queries: 6592/7405
+  queries: 6656/7405
+  queries: 6720/7405
+  queries: 6784/7405
+  queries: 6848/7405
+  queries: 6912/7405
+  queries: 6976/7405
+  queries: 7040/7405
+  queries: 7104/7405
+  queries: 7168/7405
+  queries: 7232/7405
+  queries: 7296/7405
+  queries: 7360/7405
+  queries: 7405/7405
+  Retrieving from pre-built index (5,233,329 docs) ...
+
+  scoring:   0%|          | 0.00/5.23M [00:00<?, ?doc/s]
+  scoring:   1%|          | 50.0k/5.23M [00:10<17:58, 4.80kdoc/s]
+  scoring:   2%|▏         | 100k/5.23M [00:20<17:52, 4.78kdoc/s] 
+  scoring:   3%|▎         | 150k/5.23M [00:31<17:43, 4.78kdoc/s]
+  scoring:   4%|▍         | 200k/5.23M [00:38<15:18, 5.48kdoc/s]
+  scoring:   5%|▍         | 250k/5.23M [00:40<10:55, 7.60kdoc/s]
+  scoring:   6%|▌         | 300k/5.23M [00:42<08:17, 9.91kdoc/s]
+  scoring:   7%|▋         | 350k/5.23M [00:44<06:38, 12.2kdoc/s]
+  scoring:   8%|▊         | 400k/5.23M [00:46<05:33, 14.5kdoc/s]
+  scoring:   9%|▊         | 450k/5.23M [00:48<04:48, 16.6kdoc/s]
+  scoring:  10%|▉         | 500k/5.23M [00:50<04:17, 18.4kdoc/s]
+  scoring:  11%|█         | 550k/5.23M [00:52<03:56, 19.8kdoc/s]
+  scoring:  11%|█▏        | 600k/5.23M [00:55<03:40, 21.0kdoc/s]
+  scoring:  12%|█▏        | 650k/5.23M [00:57<03:29, 21.9kdoc/s]
+  scoring:  13%|█▎        | 700k/5.23M [00:59<03:23, 22.3kdoc/s]
+  scoring:  14%|█▍        | 750k/5.23M [01:01<03:17, 22.7kdoc/s]
+  scoring:  15%|█▌        | 800k/5.23M [01:03<03:15, 22.7kdoc/s]
+  scoring:  16%|█▌        | 850k/5.23M [01:05<03:13, 22.7kdoc/s]
+  scoring:  17%|█▋        | 900k/5.23M [01:08<03:12, 22.5kdoc/s]
+  scoring:  18%|█▊        | 950k/5.23M [01:10<03:10, 22.5kdoc/s]
+  scoring:  19%|█▉        | 1.00M/5.23M [01:12<03:09, 22.4kdoc/s]
+  scoring:  20%|██        | 1.05M/5.23M [01:14<03:07, 22.3kdoc/s]
+  scoring:  21%|██        | 1.10M/5.23M [01:17<03:06, 22.2kdoc/s]
+  scoring:  22%|██▏       | 1.15M/5.23M [01:19<03:03, 22.2kdoc/s]
+  scoring:  23%|██▎       | 1.20M/5.23M [01:21<03:02, 22.0kdoc/s]
+  scoring:  24%|██▍       | 1.25M/5.23M [01:23<03:00, 22.0kdoc/s]
+  scoring:  25%|██▍       | 1.30M/5.23M [01:26<03:00, 21.8kdoc/s]
+  scoring:  26%|██▌       | 1.35M/5.23M [01:28<02:57, 21.8kdoc/s]
+  scoring:  27%|██▋       | 1.40M/5.23M [01:30<02:57, 21.6kdoc/s]
+  scoring:  28%|██▊       | 1.45M/5.23M [01:33<02:55, 21.5kdoc/s]
+  scoring:  29%|██▊       | 1.50M/5.23M [01:35<02:54, 21.4kdoc/s]
+  scoring:  30%|██▉       | 1.55M/5.23M [01:37<02:50, 21.6kdoc/s]
+  scoring:  31%|███       | 1.60M/5.23M [01:40<02:47, 21.6kdoc/s]
+  scoring:  32%|███▏      | 1.65M/5.23M [01:42<02:45, 21.7kdoc/s]
+  scoring:  32%|███▏      | 1.70M/5.23M [01:44<02:43, 21.6kdoc/s]
+  scoring:  33%|███▎      | 1.75M/5.23M [01:47<02:41, 21.5kdoc/s]
+  scoring:  34%|███▍      | 1.80M/5.23M [01:49<02:40, 21.4kdoc/s]
+  scoring:  35%|███▌      | 1.85M/5.23M [01:51<02:38, 21.4kdoc/s]
+  scoring:  36%|███▋      | 1.90M/5.23M [01:54<02:36, 21.3kdoc/s]
+  scoring:  37%|███▋      | 1.95M/5.23M [01:56<02:34, 21.3kdoc/s]
+  scoring:  38%|███▊      | 2.00M/5.23M [01:58<02:32, 21.2kdoc/s]
+  scoring:  39%|███▉      | 2.05M/5.23M [02:01<02:30, 21.1kdoc/s]
+  scoring:  40%|████      | 2.10M/5.23M [02:03<02:28, 21.1kdoc/s]
+  scoring:  41%|████      | 2.15M/5.23M [02:06<02:26, 21.0kdoc/s]
+  scoring:  42%|████▏     | 2.20M/5.23M [02:08<02:22, 21.2kdoc/s]
+  scoring:  43%|████▎     | 2.25M/5.23M [02:10<02:21, 21.0kdoc/s]
+  scoring:  44%|████▍     | 2.30M/5.23M [02:13<02:19, 21.0kdoc/s]
+  scoring:  45%|████▍     | 2.35M/5.23M [02:15<02:16, 21.2kdoc/s]
+  scoring:  46%|████▌     | 2.40M/5.23M [02:17<02:14, 21.0kdoc/s]
+  scoring:  47%|████▋     | 2.45M/5.23M [02:20<02:12, 21.0kdoc/s]
+  scoring:  48%|████▊     | 2.50M/5.23M [02:22<02:10, 20.9kdoc/s]
+  scoring:  49%|████▊     | 2.55M/5.23M [02:25<02:08, 20.9kdoc/s]
+  scoring:  50%|████▉     | 2.60M/5.23M [02:27<02:06, 20.8kdoc/s]
+  scoring:  51%|█████     | 2.65M/5.23M [02:29<02:04, 20.8kdoc/s]
+  scoring:  52%|█████▏    | 2.70M/5.23M [02:32<02:01, 20.8kdoc/s]
+  scoring:  53%|█████▎    | 2.75M/5.23M [02:34<01:59, 20.9kdoc/s]
+  scoring:  54%|█████▎    | 2.80M/5.23M [02:37<01:56, 20.8kdoc/s]
+  scoring:  54%|█████▍    | 2.85M/5.23M [02:39<01:54, 20.7kdoc/s]
+  scoring:  55%|█████▌    | 2.90M/5.23M [02:42<01:52, 20.8kdoc/s]
+  scoring:  56%|█████▋    | 2.95M/5.23M [02:44<01:49, 20.8kdoc/s]
+  scoring:  57%|█████▋    | 3.00M/5.23M [02:46<01:47, 20.8kdoc/s]
+  scoring:  58%|█████▊    | 3.05M/5.23M [02:49<01:44, 20.8kdoc/s]
+  scoring:  59%|█████▉    | 3.10M/5.23M [02:51<01:41, 21.0kdoc/s]
+  scoring:  60%|██████    | 3.15M/5.23M [02:53<01:39, 20.9kdoc/s]
+  scoring:  61%|██████    | 3.20M/5.23M [02:56<01:37, 20.8kdoc/s]
+  scoring:  62%|██████▏   | 3.25M/5.23M [02:58<01:35, 20.8kdoc/s]
+  scoring:  63%|██████▎   | 3.30M/5.23M [03:01<01:33, 20.7kdoc/s]
+  scoring:  64%|██████▍   | 3.35M/5.23M [03:03<01:31, 20.6kdoc/s]
+  scoring:  65%|██████▍   | 3.40M/5.23M [03:06<01:29, 20.5kdoc/s]
+  scoring:  66%|██████▌   | 3.45M/5.23M [03:08<01:25, 20.7kdoc/s]
+  scoring:  67%|██████▋   | 3.50M/5.23M [03:10<01:23, 20.7kdoc/s]
+  scoring:  68%|██████▊   | 3.55M/5.23M [03:13<01:22, 20.5kdoc/s]
+  scoring:  69%|██████▉   | 3.60M/5.23M [03:15<01:18, 20.8kdoc/s]
+  scoring:  70%|██████▉   | 3.65M/5.23M [03:18<01:16, 20.7kdoc/s]
+  scoring:  71%|███████   | 3.70M/5.23M [03:20<01:14, 20.5kdoc/s]
+  scoring:  72%|███████▏  | 3.75M/5.23M [03:23<01:11, 20.7kdoc/s]
+  scoring:  73%|███████▎  | 3.80M/5.23M [03:25<01:09, 20.7kdoc/s]
+  scoring:  74%|███████▎  | 3.85M/5.23M [03:27<01:06, 20.7kdoc/s]
+  scoring:  75%|███████▍  | 3.90M/5.23M [03:30<01:04, 20.7kdoc/s]
+  scoring:  75%|███████▌  | 3.95M/5.23M [03:32<01:01, 20.8kdoc/s]
+  scoring:  76%|███████▋  | 4.00M/5.23M [03:35<00:59, 20.9kdoc/s]
+  scoring:  77%|███████▋  | 4.05M/5.23M [03:37<00:56, 20.9kdoc/s]
+  scoring:  78%|███████▊  | 4.10M/5.23M [03:39<00:54, 21.0kdoc/s]
+  scoring:  79%|███████▉  | 4.15M/5.23M [03:42<00:51, 20.9kdoc/s]
+  scoring:  80%|████████  | 4.20M/5.23M [03:44<00:49, 20.7kdoc/s]
+  scoring:  81%|████████  | 4.25M/5.23M [03:47<00:47, 20.7kdoc/s]
+  scoring:  82%|████████▏ | 4.30M/5.23M [03:49<00:45, 20.6kdoc/s]
+  scoring:  83%|████████▎ | 4.35M/5.23M [03:51<00:42, 20.6kdoc/s]
+  scoring:  84%|████████▍ | 4.40M/5.23M [03:54<00:40, 20.6kdoc/s]
+  scoring:  85%|████████▌ | 4.45M/5.23M [03:56<00:38, 20.6kdoc/s]
+  scoring:  86%|████████▌ | 4.50M/5.23M [03:58<00:31, 22.9kdoc/s]
+  scoring:  87%|████████▋ | 4.55M/5.23M [03:59<00:26, 26.1kdoc/s]
+  scoring:  88%|████████▊ | 4.60M/5.23M [04:01<00:21, 28.8kdoc/s]
+  scoring:  89%|████████▉ | 4.65M/5.23M [04:02<00:18, 31.1kdoc/s]
+  scoring:  90%|████████▉ | 4.70M/5.23M [04:03<00:16, 33.1kdoc/s]
+  scoring:  91%|█████████ | 4.75M/5.23M [04:06<00:17, 28.0kdoc/s]
+  scoring:  92%|█████████▏| 4.80M/5.23M [04:08<00:16, 26.5kdoc/s]
+  scoring:  93%|█████████▎| 4.85M/5.23M [04:10<00:15, 25.2kdoc/s]
+  scoring:  94%|█████████▎| 4.90M/5.23M [04:12<00:13, 24.5kdoc/s]
+  scoring:  95%|█████████▍| 4.95M/5.23M [04:14<00:11, 23.9kdoc/s]
+  scoring:  96%|█████████▌| 5.00M/5.23M [04:16<00:09, 23.5kdoc/s]
+  scoring:  96%|█████████▋| 5.05M/5.23M [04:19<00:07, 23.1kdoc/s]
+  scoring:  97%|█████████▋| 5.10M/5.23M [04:21<00:05, 22.9kdoc/s]
+  scoring:  98%|█████████▊| 5.15M/5.23M [04:23<00:03, 23.1kdoc/s]
+  scoring:  99%|█████████▉| 5.20M/5.23M [04:25<00:01, 23.0kdoc/s]
+  scoring: 100%|██████████| 5.23M/5.23M [04:27<00:00, 22.9kdoc/s]
+  scoring: 100%|██████████| 5.23M/5.23M [04:27<00:00, 19.6kdoc/s]
+  NDCG@10: 0.6501  MRR@10: 0.8262  [index (5,233,329 docs)]
+
+────────────────────────────────────────────────────────────
+[fever]
+  Loading queries and qrels ...
+  6666 queries, 6666 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/6666
+  queries: 128/6666
+  queries: 192/6666
+  queries: 256/6666
+  queries: 320/6666
+  queries: 384/6666
+  queries: 448/6666
+  queries: 512/6666
+  queries: 576/6666
+  queries: 640/6666
+  queries: 704/6666
+  queries: 768/6666
+  queries: 832/6666
+  queries: 896/6666
+  queries: 960/6666
+  queries: 1024/6666
+  queries: 1088/6666
+  queries: 1152/6666
+  queries: 1216/6666
+  queries: 1280/6666
+  queries: 1344/6666
+  queries: 1408/6666
+  queries: 1472/6666
+  queries: 1536/6666
+  queries: 1600/6666
+  queries: 1664/6666
+  queries: 1728/6666
+  queries: 1792/6666
+  queries: 1856/6666
+  queries: 1920/6666
+  queries: 1984/6666
+  queries: 2048/6666
+  queries: 2112/6666
+  queries: 2176/6666
+  queries: 2240/6666
+  queries: 2304/6666
+  queries: 2368/6666
+  queries: 2432/6666
+  queries: 2496/6666
+  queries: 2560/6666
+  queries: 2624/6666
+  queries: 2688/6666
+  queries: 2752/6666
+  queries: 2816/6666
+  queries: 2880/6666
+  queries: 2944/6666
+  queries: 3008/6666
+  queries: 3072/6666
+  queries: 3136/6666
+  queries: 3200/6666
+  queries: 3264/6666
+  queries: 3328/6666
+  queries: 3392/6666
+  queries: 3456/6666
+  queries: 3520/6666
+  queries: 3584/6666
+  queries: 3648/6666
+  queries: 3712/6666
+  queries: 3776/6666
+  queries: 3840/6666
+  queries: 3904/6666
+  queries: 3968/6666
+  queries: 4032/6666
+  queries: 4096/6666
+  queries: 4160/6666
+  queries: 4224/6666
+  queries: 4288/6666
+  queries: 4352/6666
+  queries: 4416/6666
+  queries: 4480/6666
+  queries: 4544/6666
+  queries: 4608/6666
+  queries: 4672/6666
+  queries: 4736/6666
+  queries: 4800/6666
+  queries: 4864/6666
+  queries: 4928/6666
+  queries: 4992/6666
+  queries: 5056/6666
+  queries: 5120/6666
+  queries: 5184/6666
+  queries: 5248/6666
+  queries: 5312/6666
+  queries: 5376/6666
+  queries: 5440/6666
+  queries: 5504/6666
+  queries: 5568/6666
+  queries: 5632/6666
+  queries: 5696/6666
+  queries: 5760/6666
+  queries: 5824/6666
+  queries: 5888/6666
+  queries: 5952/6666
+  queries: 6016/6666
+  queries: 6080/6666
+  queries: 6144/6666
+  queries: 6208/6666
+  queries: 6272/6666
+  queries: 6336/6666
+  queries: 6400/6666
+  queries: 6464/6666
+  queries: 6528/6666
+  queries: 6592/6666
+  queries: 6656/6666
+  queries: 6666/6666
+  Retrieving from pre-built index (5,416,568 docs) ...
+
+  scoring:   0%|          | 0.00/5.42M [00:00<?, ?doc/s]
+  scoring:   1%|          | 50.0k/5.42M [00:02<03:39, 24.5kdoc/s]
+  scoring:   2%|▏         | 100k/5.42M [00:04<03:37, 24.5kdoc/s] 
+  scoring:   3%|▎         | 150k/5.42M [00:06<03:40, 23.9kdoc/s]
+  scoring:   4%|▎         | 200k/5.42M [00:08<03:33, 24.4kdoc/s]
+  scoring:   5%|▍         | 250k/5.42M [00:10<03:31, 24.4kdoc/s]
+  scoring:   6%|▌         | 300k/5.42M [00:12<03:30, 24.3kdoc/s]
+  scoring:   6%|▋         | 350k/5.42M [00:14<03:29, 24.2kdoc/s]
+  scoring:   7%|▋         | 400k/5.42M [00:16<03:24, 24.5kdoc/s]
+  scoring:   8%|▊         | 450k/5.42M [00:18<03:23, 24.4kdoc/s]
+  scoring:   9%|▉         | 500k/5.42M [00:20<03:20, 24.5kdoc/s]
+  scoring:  10%|█         | 550k/5.42M [00:22<03:19, 24.4kdoc/s]
+  scoring:  11%|█         | 600k/5.42M [00:24<03:17, 24.3kdoc/s]
+  scoring:  12%|█▏        | 650k/5.42M [00:25<02:52, 27.7kdoc/s]
+  scoring:  13%|█▎        | 700k/5.42M [00:27<02:32, 31.0kdoc/s]
+  scoring:  14%|█▍        | 750k/5.42M [00:28<02:19, 33.5kdoc/s]
+  scoring:  15%|█▍        | 800k/5.42M [00:29<02:10, 35.3kdoc/s]
+  scoring:  16%|█▌        | 850k/5.42M [00:30<02:04, 36.7kdoc/s]
+  scoring:  17%|█▋        | 900k/5.42M [00:32<02:01, 37.2kdoc/s]
+  scoring:  18%|█▊        | 950k/5.42M [00:33<01:55, 38.8kdoc/s]
+  scoring:  18%|█▊        | 1.00M/5.42M [00:34<01:50, 39.8kdoc/s]
+  scoring:  19%|█▉        | 1.05M/5.42M [00:35<01:48, 40.4kdoc/s]
+  scoring:  20%|██        | 1.10M/5.42M [00:36<01:46, 40.4kdoc/s]
+  scoring:  21%|██        | 1.15M/5.42M [00:38<01:45, 40.3kdoc/s]
+  scoring:  22%|██▏       | 1.20M/5.42M [00:39<01:41, 41.3kdoc/s]
+  scoring:  23%|██▎       | 1.25M/5.42M [00:40<01:44, 39.9kdoc/s]
+  scoring:  24%|██▍       | 1.30M/5.42M [00:41<01:41, 40.7kdoc/s]
+  scoring:  25%|██▍       | 1.35M/5.42M [00:42<01:38, 41.4kdoc/s]
+  scoring:  26%|██▌       | 1.40M/5.42M [00:44<01:38, 40.9kdoc/s]
+  scoring:  27%|██▋       | 1.45M/5.42M [00:45<01:42, 38.7kdoc/s]
+  scoring:  28%|██▊       | 1.50M/5.42M [00:46<01:38, 39.8kdoc/s]
+  scoring:  29%|██▊       | 1.55M/5.42M [00:47<01:35, 40.4kdoc/s]
+  scoring:  30%|██▉       | 1.60M/5.42M [00:49<01:32, 41.4kdoc/s]
+  scoring:  30%|███       | 1.65M/5.42M [00:50<01:35, 39.3kdoc/s]
+  scoring:  31%|███▏      | 1.70M/5.42M [00:52<01:56, 31.9kdoc/s]
+  scoring:  32%|███▏      | 1.75M/5.42M [00:54<01:47, 34.0kdoc/s]
+  scoring:  33%|███▎      | 1.80M/5.42M [00:55<01:41, 35.6kdoc/s]
+  scoring:  34%|███▍      | 1.85M/5.42M [00:56<01:35, 37.3kdoc/s]
+  scoring:  35%|███▌      | 1.90M/5.42M [00:57<01:30, 38.9kdoc/s]
+  scoring:  36%|███▌      | 1.95M/5.42M [00:59<01:33, 37.0kdoc/s]
+  scoring:  37%|███▋      | 2.00M/5.42M [01:00<01:40, 33.9kdoc/s]
+  scoring:  38%|███▊      | 2.05M/5.42M [01:02<01:33, 35.9kdoc/s]
+  scoring:  39%|███▉      | 2.10M/5.42M [01:03<01:28, 37.6kdoc/s]
+  scoring:  40%|███▉      | 2.15M/5.42M [01:04<01:24, 38.7kdoc/s]
+  scoring:  41%|████      | 2.20M/5.42M [01:06<01:29, 36.1kdoc/s]
+  scoring:  42%|████▏     | 2.25M/5.42M [01:07<01:28, 35.8kdoc/s]
+  scoring:  42%|████▏     | 2.30M/5.42M [01:08<01:22, 37.7kdoc/s]
+  scoring:  43%|████▎     | 2.35M/5.42M [01:09<01:18, 39.0kdoc/s]
+  scoring:  44%|████▍     | 2.40M/5.42M [01:11<01:15, 39.7kdoc/s]
+  scoring:  45%|████▌     | 2.45M/5.42M [01:12<01:14, 39.8kdoc/s]
+  scoring:  46%|████▌     | 2.50M/5.42M [01:13<01:15, 38.9kdoc/s]
+  scoring:  47%|████▋     | 2.55M/5.42M [01:14<01:12, 39.8kdoc/s]
+  scoring:  48%|████▊     | 2.60M/5.42M [01:16<01:09, 40.6kdoc/s]
+  scoring:  49%|████▉     | 2.65M/5.42M [01:17<01:07, 41.3kdoc/s]
+  scoring:  50%|████▉     | 2.70M/5.42M [01:18<01:07, 40.5kdoc/s]
+  scoring:  51%|█████     | 2.75M/5.42M [01:19<01:07, 39.7kdoc/s]
+  scoring:  52%|█████▏    | 2.80M/5.42M [01:20<01:04, 40.8kdoc/s]
+  scoring:  53%|█████▎    | 2.85M/5.42M [01:22<01:02, 41.2kdoc/s]
+  scoring:  54%|█████▎    | 2.90M/5.42M [01:23<01:00, 41.3kdoc/s]
+  scoring:  54%|█████▍    | 2.95M/5.42M [01:24<00:58, 41.9kdoc/s]
+  scoring:  55%|█████▌    | 3.00M/5.42M [01:26<01:10, 34.1kdoc/s]
+  scoring:  56%|█████▋    | 3.05M/5.42M [01:28<01:20, 29.5kdoc/s]
+  scoring:  57%|█████▋    | 3.10M/5.42M [01:31<01:27, 26.6kdoc/s]
+  scoring:  58%|█████▊    | 3.15M/5.42M [01:33<01:30, 25.0kdoc/s]
+  scoring:  59%|█████▉    | 3.20M/5.42M [01:35<01:31, 24.1kdoc/s]
+  scoring:  60%|██████    | 3.25M/5.42M [01:37<01:32, 23.3kdoc/s]
+  scoring:  61%|██████    | 3.30M/5.42M [01:40<01:32, 22.8kdoc/s]
+  scoring:  62%|██████▏   | 3.35M/5.42M [01:42<01:29, 23.2kdoc/s]
+  scoring:  63%|██████▎   | 3.40M/5.42M [01:44<01:29, 22.5kdoc/s]
+  scoring:  64%|██████▎   | 3.45M/5.42M [01:47<01:28, 22.1kdoc/s]
+  scoring:  65%|██████▍   | 3.50M/5.42M [01:49<01:27, 21.9kdoc/s]
+  scoring:  66%|██████▌   | 3.55M/5.42M [01:51<01:25, 21.8kdoc/s]
+  scoring:  66%|██████▋   | 3.60M/5.42M [01:54<01:23, 21.7kdoc/s]
+  scoring:  67%|██████▋   | 3.65M/5.42M [01:56<01:21, 21.6kdoc/s]
+  scoring:  68%|██████▊   | 3.70M/5.42M [01:58<01:19, 21.6kdoc/s]
+  scoring:  69%|██████▉   | 3.75M/5.42M [02:00<01:16, 21.7kdoc/s]
+  scoring:  70%|███████   | 3.80M/5.42M [02:03<01:14, 21.6kdoc/s]
+  scoring:  71%|███████   | 3.85M/5.42M [02:05<01:12, 21.6kdoc/s]
+  scoring:  72%|███████▏  | 3.90M/5.42M [02:07<01:10, 21.6kdoc/s]
+  scoring:  73%|███████▎  | 3.95M/5.42M [02:10<01:07, 21.6kdoc/s]
+  scoring:  74%|███████▍  | 4.00M/5.42M [02:12<01:05, 21.6kdoc/s]
+  scoring:  75%|███████▍  | 4.05M/5.42M [02:14<01:03, 21.5kdoc/s]
+  scoring:  76%|███████▌  | 4.10M/5.42M [02:16<00:57, 22.8kdoc/s]
+  scoring:  77%|███████▋  | 4.15M/5.42M [02:17<00:47, 26.6kdoc/s]
+  scoring:  78%|███████▊  | 4.20M/5.42M [02:19<00:40, 30.0kdoc/s]
+  scoring:  78%|███████▊  | 4.25M/5.42M [02:20<00:35, 32.5kdoc/s]
+  scoring:  79%|███████▉  | 4.30M/5.42M [02:21<00:31, 34.9kdoc/s]
+  scoring:  80%|████████  | 4.35M/5.42M [02:23<00:33, 32.3kdoc/s]
+  scoring:  81%|████████  | 4.40M/5.42M [02:25<00:35, 28.5kdoc/s]
+  scoring:  82%|████████▏ | 4.45M/5.42M [02:27<00:35, 27.1kdoc/s]
+  scoring:  83%|████████▎ | 4.50M/5.42M [02:29<00:35, 25.5kdoc/s]
+  scoring:  84%|████████▍ | 4.55M/5.42M [02:32<00:35, 24.6kdoc/s]
+  scoring:  85%|████████▍ | 4.60M/5.42M [02:34<00:33, 24.2kdoc/s]
+  scoring:  86%|████████▌ | 4.65M/5.42M [02:36<00:32, 23.7kdoc/s]
+  scoring:  87%|████████▋ | 4.70M/5.42M [02:38<00:30, 23.3kdoc/s]
+  scoring:  88%|████████▊ | 4.75M/5.42M [02:40<00:29, 22.9kdoc/s]
+  scoring:  89%|████████▊ | 4.80M/5.42M [02:43<00:27, 22.7kdoc/s]
+  scoring:  90%|████████▉ | 4.85M/5.42M [02:45<00:24, 22.7kdoc/s]
+  scoring:  90%|█████████ | 4.90M/5.42M [02:47<00:22, 22.6kdoc/s]
+  scoring:  91%|█████████▏| 4.95M/5.42M [02:49<00:20, 22.5kdoc/s]
+  scoring:  92%|█████████▏| 5.00M/5.42M [02:52<00:18, 22.6kdoc/s]
+  scoring:  93%|█████████▎| 5.05M/5.42M [02:54<00:16, 22.8kdoc/s]
+  scoring:  94%|█████████▍| 5.10M/5.42M [02:56<00:13, 22.9kdoc/s]
+  scoring:  95%|█████████▌| 5.15M/5.42M [02:58<00:11, 22.8kdoc/s]
+  scoring:  96%|█████████▌| 5.20M/5.42M [03:00<00:09, 22.9kdoc/s]
+  scoring:  97%|█████████▋| 5.25M/5.42M [03:02<00:07, 22.9kdoc/s]
+  scoring:  98%|█████████▊| 5.30M/5.42M [03:05<00:05, 22.8kdoc/s]
+  scoring:  99%|█████████▉| 5.35M/5.42M [03:07<00:02, 23.0kdoc/s]
+  scoring: 100%|█████████▉| 5.40M/5.42M [03:09<00:00, 22.7kdoc/s]
+  scoring: 100%|██████████| 5.42M/5.42M [03:10<00:00, 22.9kdoc/s]
+  scoring: 100%|██████████| 5.42M/5.42M [03:10<00:00, 28.5kdoc/s]
+  NDCG@10: 0.6947  MRR@10: 0.6875  [index (5,416,568 docs)]
+
+────────────────────────────────────────────────────────────
+[climate-fever]
+  Loading queries and qrels ...
+  1534 queries, 1535 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1534
+  queries: 128/1534
+  queries: 192/1534
+  queries: 256/1534
+  queries: 320/1534
+  queries: 384/1534
+  queries: 448/1534
+  queries: 512/1534
+  queries: 576/1534
+  queries: 640/1534
+  queries: 704/1534
+  queries: 768/1534
+  queries: 832/1534
+  queries: 896/1534
+  queries: 960/1534
+  queries: 1024/1534
+  queries: 1088/1534
+  queries: 1152/1534
+  queries: 1216/1534
+  queries: 1280/1534
+  queries: 1344/1534
+  queries: 1408/1534
+  queries: 1472/1534
+  queries: 1534/1534
+  Retrieving from pre-built index (5,416,593 docs) ...
+
+  scoring:   0%|          | 0.00/5.42M [00:00<?, ?doc/s]
+  scoring:   1%|          | 50.0k/5.42M [00:00<01:07, 79.9kdoc/s]
+  scoring:   2%|▏         | 100k/5.42M [00:01<01:05, 81.5kdoc/s] 
+  scoring:   3%|▎         | 150k/5.42M [00:01<01:05, 80.5kdoc/s]
+  scoring:   4%|▎         | 200k/5.42M [00:02<01:02, 82.9kdoc/s]
+  scoring:   5%|▍         | 250k/5.42M [00:03<01:04, 80.7kdoc/s]
+  scoring:   6%|▌         | 300k/5.42M [00:03<01:02, 82.0kdoc/s]
+  scoring:   6%|▋         | 350k/5.42M [00:04<01:02, 80.5kdoc/s]
+  scoring:   7%|▋         | 400k/5.42M [00:04<01:01, 81.6kdoc/s]
+  scoring:   8%|▊         | 450k/5.42M [00:05<01:01, 80.5kdoc/s]
+  scoring:   9%|▉         | 500k/5.42M [00:06<01:01, 79.5kdoc/s]
+  scoring:  10%|█         | 550k/5.42M [00:06<00:59, 81.8kdoc/s]
+  scoring:  11%|█         | 600k/5.42M [00:07<01:00, 79.9kdoc/s]
+  scoring:  12%|█▏        | 650k/5.42M [00:07<00:57, 82.9kdoc/s]
+  scoring:  13%|█▎        | 700k/5.42M [00:08<00:59, 79.8kdoc/s]
+  scoring:  14%|█▍        | 750k/5.42M [00:09<00:57, 80.8kdoc/s]
+  scoring:  15%|█▍        | 800k/5.42M [00:09<00:55, 82.8kdoc/s]
+  scoring:  16%|█▌        | 850k/5.42M [00:10<00:48, 93.5kdoc/s]
+  scoring:  17%|█▋        | 900k/5.42M [00:10<00:44, 102kdoc/s] 
+  scoring:  18%|█▊        | 950k/5.42M [00:10<00:41, 108kdoc/s]
+  scoring:  18%|█▊        | 1.00M/5.42M [00:11<00:38, 115kdoc/s]
+  scoring:  19%|█▉        | 1.05M/5.42M [00:11<00:37, 118kdoc/s]
+  scoring:  20%|██        | 1.10M/5.42M [00:12<00:36, 120kdoc/s]
+  scoring:  21%|██        | 1.15M/5.42M [00:12<00:34, 124kdoc/s]
+  scoring:  22%|██▏       | 1.20M/5.42M [00:12<00:33, 125kdoc/s]
+  scoring:  23%|██▎       | 1.25M/5.42M [00:13<00:32, 128kdoc/s]
+  scoring:  24%|██▍       | 1.30M/5.42M [00:13<00:31, 129kdoc/s]
+  scoring:  25%|██▍       | 1.35M/5.42M [00:14<00:31, 129kdoc/s]
+  scoring:  26%|██▌       | 1.40M/5.42M [00:14<00:31, 128kdoc/s]
+  scoring:  27%|██▋       | 1.45M/5.42M [00:14<00:31, 128kdoc/s]
+  scoring:  28%|██▊       | 1.50M/5.42M [00:15<00:30, 130kdoc/s]
+  scoring:  29%|██▊       | 1.55M/5.42M [00:15<00:29, 130kdoc/s]
+  scoring:  30%|██▉       | 1.60M/5.42M [00:16<00:32, 116kdoc/s]
+  scoring:  30%|███       | 1.65M/5.42M [00:16<00:35, 107kdoc/s]
+  scoring:  31%|███▏      | 1.70M/5.42M [00:17<00:35, 105kdoc/s]
+  scoring:  32%|███▏      | 1.75M/5.42M [00:17<00:35, 104kdoc/s]
+  scoring:  33%|███▎      | 1.80M/5.42M [00:18<00:35, 101kdoc/s]
+  scoring:  34%|███▍      | 1.85M/5.42M [00:18<00:36, 99.0kdoc/s]
+  scoring:  35%|███▌      | 1.90M/5.42M [00:19<00:34, 103kdoc/s] 
+  scoring:  36%|███▌      | 1.95M/5.42M [00:19<00:34, 101kdoc/s]
+  scoring:  37%|███▋      | 2.00M/5.42M [00:20<00:34, 100kdoc/s]
+  scoring:  38%|███▊      | 2.05M/5.42M [00:20<00:34, 99.0kdoc/s]
+  scoring:  39%|███▉      | 2.10M/5.42M [00:21<00:32, 101kdoc/s] 
+  scoring:  40%|███▉      | 2.15M/5.42M [00:21<00:32, 99.3kdoc/s]
+  scoring:  41%|████      | 2.20M/5.42M [00:22<00:33, 96.2kdoc/s]
+  scoring:  42%|████▏     | 2.25M/5.42M [00:22<00:33, 95.2kdoc/s]
+  scoring:  42%|████▏     | 2.30M/5.42M [00:23<00:32, 97.1kdoc/s]
+  scoring:  43%|████▎     | 2.35M/5.42M [00:23<00:31, 96.1kdoc/s]
+  scoring:  44%|████▍     | 2.40M/5.42M [00:24<00:31, 95.0kdoc/s]
+  scoring:  45%|████▌     | 2.45M/5.42M [00:24<00:30, 96.3kdoc/s]
+  scoring:  46%|████▌     | 2.50M/5.42M [00:25<00:29, 100kdoc/s] 
+  scoring:  47%|████▋     | 2.55M/5.42M [00:25<00:28, 100kdoc/s]
+  scoring:  48%|████▊     | 2.60M/5.42M [00:26<00:29, 94.7kdoc/s]
+  scoring:  49%|████▉     | 2.65M/5.42M [00:26<00:29, 93.1kdoc/s]
+  scoring:  50%|████▉     | 2.70M/5.42M [00:27<00:28, 94.5kdoc/s]
+  scoring:  51%|█████     | 2.75M/5.42M [00:27<00:27, 96.2kdoc/s]
+  scoring:  52%|█████▏    | 2.80M/5.42M [00:28<00:26, 97.4kdoc/s]
+  scoring:  53%|█████▎    | 2.85M/5.42M [00:28<00:26, 98.1kdoc/s]
+  scoring:  54%|█████▎    | 2.90M/5.42M [00:29<00:26, 94.0kdoc/s]
+  scoring:  54%|█████▍    | 2.95M/5.42M [00:30<00:26, 94.2kdoc/s]
+  scoring:  55%|█████▌    | 3.00M/5.42M [00:30<00:24, 98.8kdoc/s]
+  scoring:  56%|█████▋    | 3.05M/5.42M [00:31<00:23, 98.7kdoc/s]
+  scoring:  57%|█████▋    | 3.10M/5.42M [00:31<00:23, 98.5kdoc/s]
+  scoring:  58%|█████▊    | 3.15M/5.42M [00:32<00:24, 94.4kdoc/s]
+  scoring:  59%|█████▉    | 3.20M/5.42M [00:32<00:24, 91.6kdoc/s]
+  scoring:  60%|██████    | 3.25M/5.42M [00:33<00:24, 88.2kdoc/s]
+  scoring:  61%|██████    | 3.30M/5.42M [00:33<00:23, 89.9kdoc/s]
+  scoring:  62%|██████▏   | 3.35M/5.42M [00:34<00:22, 91.5kdoc/s]
+  scoring:  63%|██████▎   | 3.40M/5.42M [00:34<00:21, 93.2kdoc/s]
+  scoring:  64%|██████▎   | 3.45M/5.42M [00:35<00:20, 95.6kdoc/s]
+  scoring:  65%|██████▍   | 3.50M/5.42M [00:35<00:19, 96.0kdoc/s]
+  scoring:  66%|██████▌   | 3.55M/5.42M [00:36<00:19, 94.3kdoc/s]
+  scoring:  66%|██████▋   | 3.60M/5.42M [00:37<00:19, 92.0kdoc/s]
+  scoring:  67%|██████▋   | 3.65M/5.42M [00:37<00:19, 91.1kdoc/s]
+  scoring:  68%|██████▊   | 3.70M/5.42M [00:38<00:18, 94.0kdoc/s]
+  scoring:  69%|██████▉   | 3.75M/5.42M [00:38<00:17, 95.8kdoc/s]
+  scoring:  70%|███████   | 3.80M/5.42M [00:39<00:16, 95.3kdoc/s]
+  scoring:  71%|███████   | 3.85M/5.42M [00:39<00:16, 95.5kdoc/s]
+  scoring:  72%|███████▏  | 3.90M/5.42M [00:40<00:16, 94.3kdoc/s]
+  scoring:  73%|███████▎  | 3.95M/5.42M [00:40<00:15, 94.6kdoc/s]
+  scoring:  74%|███████▍  | 4.00M/5.42M [00:41<00:14, 98.7kdoc/s]
+  scoring:  75%|███████▍  | 4.05M/5.42M [00:41<00:13, 99.3kdoc/s]
+  scoring:  76%|███████▌  | 4.10M/5.42M [00:42<00:13, 95.1kdoc/s]
+  scoring:  77%|███████▋  | 4.15M/5.42M [00:42<00:13, 92.7kdoc/s]
+  scoring:  78%|███████▊  | 4.20M/5.42M [00:43<00:12, 95.1kdoc/s]
+  scoring:  78%|███████▊  | 4.25M/5.42M [00:43<00:11, 100kdoc/s] 
+  scoring:  79%|███████▉  | 4.30M/5.42M [00:44<00:10, 107kdoc/s]
+  scoring:  80%|████████  | 4.35M/5.42M [00:44<00:09, 114kdoc/s]
+  scoring:  81%|████████  | 4.40M/5.42M [00:44<00:08, 117kdoc/s]
+  scoring:  82%|████████▏ | 4.45M/5.42M [00:45<00:08, 121kdoc/s]
+  scoring:  83%|████████▎ | 4.50M/5.42M [00:45<00:07, 123kdoc/s]
+  scoring:  84%|████████▍ | 4.55M/5.42M [00:46<00:06, 125kdoc/s]
+  scoring:  85%|████████▍ | 4.60M/5.42M [00:46<00:06, 127kdoc/s]
+  scoring:  86%|████████▌ | 4.65M/5.42M [00:46<00:06, 127kdoc/s]
+  scoring:  87%|████████▋ | 4.70M/5.42M [00:47<00:05, 130kdoc/s]
+  scoring:  88%|████████▊ | 4.75M/5.42M [00:47<00:05, 132kdoc/s]
+  scoring:  89%|████████▊ | 4.80M/5.42M [00:47<00:04, 134kdoc/s]
+  scoring:  90%|████████▉ | 4.85M/5.42M [00:48<00:04, 139kdoc/s]
+  scoring:  90%|█████████ | 4.90M/5.42M [00:48<00:03, 138kdoc/s]
+  scoring:  91%|█████████▏| 4.95M/5.42M [00:49<00:03, 137kdoc/s]
+  scoring:  92%|█████████▏| 5.00M/5.42M [00:49<00:03, 137kdoc/s]
+  scoring:  93%|█████████▎| 5.05M/5.42M [00:49<00:02, 136kdoc/s]
+  scoring:  94%|█████████▍| 5.10M/5.42M [00:50<00:02, 140kdoc/s]
+  scoring:  95%|█████████▌| 5.15M/5.42M [00:50<00:01, 137kdoc/s]
+  scoring:  96%|█████████▌| 5.20M/5.42M [00:51<00:01, 110kdoc/s]
+  scoring:  97%|█████████▋| 5.25M/5.42M [00:51<00:01, 97.8kdoc/s]
+  scoring:  98%|█████████▊| 5.30M/5.42M [00:52<00:01, 89.8kdoc/s]
+  scoring:  99%|█████████▉| 5.35M/5.42M [00:53<00:00, 84.0kdoc/s]
+  scoring: 100%|█████████▉| 5.40M/5.42M [00:53<00:00, 81.5kdoc/s]
+  scoring: 100%|██████████| 5.42M/5.42M [00:53<00:00, 81.3kdoc/s]
+  scoring: 100%|██████████| 5.42M/5.42M [00:53<00:00, 100kdoc/s] 
+  NDCG@10: 0.1638  MRR@10: 0.2328  [index (5,416,593 docs)]
+
+============================================================
+Checkpoint : checkpoints_splade-v3/splade_shallow_spaced3/best_NanoMSMARCO.pt
+Stage      : splade_shallow
+────────────────────────────────────────────────────────────
+Dataset                 NDCG@10     MRR@10
+──────────────────────────────────────────
+nfcorpus                 0.3326     0.5517
+scifact                  0.6297     0.6023
+arguana                  0.3206     0.2155
+scidocs                  0.1541     0.2719
+fiqa                     0.3183     0.3938
+trec-covid               0.7172     0.9025
+webis-touche2020         0.2901     0.5458
+quora                    0.7738     0.7546
+nq                       0.5474     0.4999
+dbpedia-entity           0.4233     0.7246
+hotpotqa                 0.6501     0.8262
+fever                    0.6947     0.6875
+climate-fever            0.1638     0.2328
+──────────────────────────────────────────
+Average                  0.4627     0.5545
+============================================================

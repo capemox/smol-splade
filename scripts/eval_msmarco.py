@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""Full MSMARCO dev evaluation for VocabTransplant query models.
+"""Full MSMARCO dev evaluation for shallow/pruned query models.
 
 Streams the 8.8M-passage corpus in batches — no full corpus load into RAM.
 Processes queries in sub-batches so only a small slice of query vecs lives
 on GPU at any time. Reports NDCG@10 and MRR@10 on the standard dev set.
 
 Usage:
-    uv run scripts/eval_msmarco.py --checkpoint checkpoints/vocab_transplant/step_10000.pt
-    uv run scripts/eval_msmarco.py --checkpoint checkpoints/vocab_transplant/align_step_10000.pt
+    uv run scripts/eval_msmarco.py --stage splade_shallow --checkpoint checkpoints_splade-v3/splade_shallow/align_final.pt
+    uv run scripts/eval_msmarco.py --stage lion_shallow --checkpoint checkpoints_lion_shallow/lion_shallow/align_final.pt
 """
 
 import argparse
@@ -373,69 +373,94 @@ def _infer_factor_dim(state: dict, config_fallback: int) -> int:
     return config_fallback
 
 
+def _infer_layer_indices(state: dict) -> list[int] | None:
+    """Infer which transformer layer indices are present in a checkpoint.
+
+    Handles both BERT-style keys (encoder.layer.N) and LLaMA-style keys
+    (layers.N). Returns sorted unique layer indices, or None if not found.
+    """
+    import re
+    patterns = [
+        re.compile(r"encoder\.layer\.(\d+)\."),   # BERT / SPLADE
+        re.compile(r"\.layers\.(\d+)\."),           # LLaMA / Lion
+    ]
+    for pat in patterns:
+        indices = {int(m.group(1)) for k in state for m in [pat.search(k)] if m}
+        if indices:
+            return sorted(indices)
+    return None
+
+
 def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
     """Load a shallow query model from a checkpoint.
 
-    Loads the checkpoint before constructing the model so architecture
-    hyperparameters (e.g. factorized_embedding_dim) are read from the saved
-    weights rather than from config — avoids shape mismatches when config drifts.
+    Infers n_layers and layer_indices from the checkpoint state dict so the
+    correct architecture is constructed regardless of what the config says.
     """
     import torch
     ckpt = torch.load(checkpoint, map_location="cpu")
     state = ckpt["model"]
+    factorized = bool(sc.get("factorize_embeddings", False))
 
-    if stage == "splade_shallow_align":
-        from model import ShallowSpladeQuery
+    if stage == "splade_static":
+        from model import StaticSpladeQuery
         hf_id = sc["doc_splade_hf_id"]
-        print(f"Loading ShallowSpladeQuery ({sc['n_layers']} layers) from {checkpoint} ...")
-        model = ShallowSpladeQuery(
-            hf_id,
-            sc["n_layers"],
-            layer_indices=sc.get("layer_indices"),
-        )
-    elif stage in ("splade_shallow_factorized_align", "splade_shallow_factorized_spaced_align"):
-        from model import ShallowFactorizedSpladeQuery
+        print(f"Loading StaticSpladeQuery from {checkpoint} ...")
+        model = StaticSpladeQuery(hf_id)
+        model.load_state_dict(state)
+        model.to(device).eval()
+        print(f"  Step: {ckpt.get('step', 'unknown')}")
+        return model, model.tokenizer
+
+    if stage == "lion_static":
+        from model import StaticLionQuery
+        hf_id = sc["lion_hf_id"]
+        print(f"Loading StaticLionQuery from {checkpoint} ...")
+        model = StaticLionQuery(hf_id)
+        model.load_state_dict(state)
+        model.to(device).eval()
+        print(f"  Step: {ckpt.get('step', 'unknown')}")
+        return model, model.tokenizer
+
+    layer_indices = _infer_layer_indices(state)
+    if layer_indices is not None:
+        n_layers = len(layer_indices)
+    else:
+        layer_indices = sc.get("layer_indices")
+        n_layers = len(layer_indices) if layer_indices is not None else sc["n_layers"]
+
+    if stage == "splade_shallow":
         hf_id = sc["doc_splade_hf_id"]
-        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
-        print(
-            f"Loading ShallowFactorizedSpladeQuery ({sc['n_layers']} layers, "
-            f"factor_dim={factor_dim}, "
-            f"layers={sc.get('layer_indices', list(range(sc['n_layers'])))}"
-            f") from {checkpoint} ..."
-        )
-        model = ShallowFactorizedSpladeQuery(
-            hf_id,
-            sc["n_layers"],
-            factorized_embedding_dim=factor_dim,
-            init="random",
-            layer_indices=sc.get("layer_indices"),
-        )
-    elif stage == "lion_shallow_align":
-        from model import ShallowLionQuery
+        if factorized:
+            from model import ShallowFactorizedSpladeQuery
+            factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
+            print(f"Loading ShallowFactorizedSpladeQuery ({n_layers} layers, factor_dim={factor_dim}) from {checkpoint} ...")
+            model = ShallowFactorizedSpladeQuery(
+                hf_id, n_layers,
+                factorized_embedding_dim=factor_dim,
+                init="random",
+                layer_indices=layer_indices,
+            )
+        else:
+            from model import ShallowSpladeQuery
+            print(f"Loading ShallowSpladeQuery ({n_layers} layers) from {checkpoint} ...")
+            model = ShallowSpladeQuery(hf_id, n_layers, layer_indices=layer_indices)
+    elif stage == "lion_shallow":
         hf_id = sc["lion_hf_id"]
-        print(f"Loading ShallowLionQuery ({sc['n_layers']} layers) from {checkpoint} ...")
-        model = ShallowLionQuery(
-            hf_id,
-            sc["n_layers"],
-            layer_indices=sc.get("layer_indices"),
-        )
-    elif stage in ("lion_shallow_factorized_align", "lion_shallow_factorized_spaced_align"):
-        from model import ShallowFactorizedLionQuery
-        hf_id = sc["lion_hf_id"]
-        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
-        print(
-            f"Loading ShallowFactorizedLionQuery ({sc['n_layers']} layers, "
-            f"factor_dim={factor_dim}, "
-            f"layers={sc.get('layer_indices', list(range(sc['n_layers'])))}"
-            f") from {checkpoint} ..."
-        )
-        model = ShallowFactorizedLionQuery(
-            hf_id,
-            sc["n_layers"],
-            factorized_embedding_dim=factor_dim,
-            init="random",
-            layer_indices=sc.get("layer_indices"),
-        )
+        if factorized:
+            from model import ShallowFactorizedLionQuery
+            factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
+            print(f"Loading ShallowFactorizedLionQuery ({n_layers} layers, factor_dim={factor_dim}) from {checkpoint} ...")
+            model = ShallowFactorizedLionQuery(
+                hf_id, n_layers,
+                factorized_embedding_dim=factor_dim,
+                init="random",
+                layer_indices=layer_indices,
+            )
+        else:
+            from model import ShallowLionQuery
+            print(f"Loading ShallowLionQuery ({n_layers} layers) from {checkpoint} ...")
+            model = ShallowLionQuery(hf_id, n_layers, layer_indices=layer_indices)
     else:
         raise ValueError(f"Unsupported shallow stage: {stage}")
 
@@ -447,22 +472,14 @@ def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Full MSMARCO dev eval for VocabTransplant / shallow models"
+        description="Full MSMARCO dev eval for shallow/pruned query models"
     )
     parser.add_argument("--checkpoint", default=None, help="Path to .pt checkpoint file (not needed with --doc_only)")
     parser.add_argument("--doc_only", action="store_true", help="Benchmark doc encoder on both queries and docs (upper-bound ceiling)")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
-        "--stage", default="vocab_transplant",
-        choices=[
-            "vocab_transplant",
-            "splade_shallow_align",
-            "splade_shallow_factorized_align",
-            "splade_shallow_factorized_spaced_align",
-            "lion_shallow_align",
-            "lion_shallow_factorized_align",
-            "lion_shallow_factorized_spaced_align",
-        ],
+        "--stage", default="splade_shallow",
+        choices=["splade_shallow", "lion_shallow", "splade_static", "lion_static"],
         help="Model type to evaluate (selects config section and model class)",
     )
     parser.add_argument(
@@ -509,23 +526,18 @@ def main():
     query_ids, query_texts, qrels = load_dev_queries_and_qrels()
 
     # ── Stage-specific model + config setup ───────────────────────────────────
-    if args.stage in (
-        "splade_shallow_align",
-        "splade_shallow_factorized_align",
-        "splade_shallow_factorized_spaced_align",
-        "lion_shallow_align",
-        "lion_shallow_factorized_align",
-        "lion_shallow_factorized_spaced_align",
-    ):
+    # Map static stages to their shallow counterparts for doc encoder + index reuse
+    _effective_stage = {
+        "splade_static": "splade_shallow",
+        "lion_static": "lion_shallow",
+    }.get(args.stage, args.stage)
+
+    if args.stage in ("splade_shallow", "lion_shallow", "splade_static", "lion_static"):
         sc = cfg[args.stage]
         query_max_length = sc["query_max_length"]
         doc_max_length = sc["doc_max_length"]
 
-        if args.stage in (
-            "splade_shallow_align",
-            "splade_shallow_factorized_align",
-            "splade_shallow_factorized_spaced_align",
-        ):
+        if _effective_stage == "splade_shallow":
             from model import FrozenDocSPLADE
             doc_hf_id = sc["doc_splade_hf_id"]
             print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
@@ -573,8 +585,8 @@ def main():
             gc.collect()
             ckpt_label = args.checkpoint
 
-        corpus_dataset = cfg["sae"]["corpus_dataset"]
-        text_field = cfg["sae"].get("corpus_text_field", "text")
+        corpus_dataset = cfg.get("data", {}).get("corpus_dataset", "Tevatron/msmarco-passage-corpus")
+        text_field = cfg.get("data", {}).get("corpus_text_field", "text")
 
         if has_index:
             index_dir = Path(args.index_dir)
@@ -614,95 +626,6 @@ def main():
                 args.topk, device,
             )
             corpus_label = f"{len(corpus_texts):,}-passage subset"
-
-    else:
-        # ── Original vocab_transplant path ────────────────────────────────────
-        vc = cfg["vocab_transplant"]
-        from model import FrozenDocSPLADE, VocabTransplantQuerySPLADE
-        from transformers import AutoTokenizer
-
-        print(f"Loading frozen doc SPLADE: {vc['doc_splade_hf_id']} ...")
-        doc_splade = FrozenDocSPLADE(vc["doc_splade_hf_id"])
-        doc_splade.to(device)
-        doc_splade.eval()
-
-        if args.doc_only:
-            print(f"Encoding {len(query_texts)} dev queries with doc SPLADE (ceiling) ...")
-            query_vecs = encode_queries_with_doc_splade(
-                doc_splade, query_texts, vc["query_max_length"], args.encode_batch_size,
-            )
-            ckpt_label = f"{vc['doc_splade_hf_id']} (doc_only ceiling)"
-        else:
-            transplant_dir = str(
-                Path(f"checkpoints_{vc['query_hf_id'].split('/')[-1]}")
-                / vc["transplant_dir"]
-            )
-            if not Path(transplant_dir, "config.json").exists():
-                raise SystemExit(
-                    f"Transplant directory not found: {transplant_dir}\n"
-                    f"Expected layout (matches train.py): "
-                    f"checkpoints_<query_model>/{vc['transplant_dir']}/config.json\n"
-                    f"Check vocab_transplant.query_hf_id and vocab_transplant.transplant_dir in config.yaml."
-                )
-            print(f"Loading query model from {args.checkpoint} (architecture: {transplant_dir}) ...")
-            query_model = VocabTransplantQuerySPLADE(transplant_dir)
-            ckpt = torch.load(args.checkpoint, map_location="cpu")
-            query_model.load_state_dict(ckpt["model"])
-            query_model.to(device)
-            query_model.eval()
-            query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
-            print(f"  Checkpoint step: {ckpt.get('step', 'unknown')}")
-
-            print(f"Encoding {len(query_texts)} dev queries ...")
-            query_vecs = encode_queries(
-                query_model, query_tokenizer, query_texts,
-                vc["query_max_length"], args.encode_batch_size, device,
-            )
-            query_model.cpu()
-            torch.cuda.empty_cache()
-            del query_model
-            gc.collect()
-            ckpt_label = args.checkpoint
-
-        corpus_dataset = cfg["sae"]["corpus_dataset"]
-        text_field = cfg["sae"].get("corpus_text_field", "text")
-
-        if args.max_corpus_size > 0:
-            corpus_ids, corpus_texts = resolve_corpus_subset(
-                args.max_corpus_size, corpus_dataset, text_field, qrels
-            )
-
-            query_vecs = query_vecs.half()
-            gc.collect()
-            print(f"Retrieving from {len(corpus_texts):,}-passage subset ...")
-            ranked = list_retrieve(
-                query_vecs, doc_splade, corpus_ids, corpus_texts,
-                vc["doc_max_length"], args.doc_batch_size, args.query_batch_size,
-                args.topk, device,
-            )
-            corpus_label = f"{len(corpus_texts):,}-passage subset"
-        else:
-            index_dir = Path(args.index_dir)
-            manifest = _load_manifest(
-                index_dir,
-                expected_doc_splade=vc["doc_splade_hf_id"],
-                expected_vocab=doc_splade.vocab_size,
-            )
-            vocab_size = int(manifest["vocab_size"])
-            doc_splade.cpu()
-            del doc_splade
-            torch.cuda.empty_cache()
-            query_vecs = query_vecs.half()
-            gc.collect()
-            ranked = indexed_retrieve(
-                query_vecs, index_dir, vocab_size,
-                args.densify_chunk, args.topk, device,
-            )
-            n_indexed = sum(
-                int(np.load(sp, allow_pickle=True)["offsets"].shape[0] - 1)
-                for sp in _shard_files(index_dir)
-            )
-            corpus_label = f"{n_indexed:,}-passage on-disk index"
 
     n10 = ndcg_at_k(ranked, qrels, query_ids, k=10)
     m10 = mrr_at_k(ranked, qrels, query_ids, k=10)

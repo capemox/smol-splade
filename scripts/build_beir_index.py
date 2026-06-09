@@ -216,18 +216,8 @@ def main():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
         "--stage",
-        default="vocab_transplant",
-        choices=[
-            "vocab_transplant",
-            "splade_shallow_align",
-            "splade_shallow_factorized_align",
-            "splade_shallow_factorized_spaced_align",
-            "lion_shallow_align",
-            "lion_shallow_factorized_align",
-            "lion_shallow_factorized_spaced_align",
-            "lion_shallow_factorized_cosine_align",
-            "lion_shallow_factorized_spaced_contrastive_align",
-        ],
+        default="splade_shallow",
+        choices=["splade_shallow", "lion_shallow"],
         help="Config section whose frozen doc encoder builds the index",
     )
     parser.add_argument(
@@ -260,7 +250,7 @@ def main():
         doc_splade = FrozenLionSPLADE(doc_hf_id)
     else:
         from model import FrozenDocSPLADE
-        doc_hf_id = sc.get("doc_splade_hf_id") or cfg["vocab_transplant"]["doc_splade_hf_id"]
+        doc_hf_id = sc["doc_splade_hf_id"]
         print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
         doc_splade = FrozenDocSPLADE(doc_hf_id)
     doc_splade.to(device)

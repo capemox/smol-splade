@@ -1,0 +1,169 @@
+Device: cuda
+Loading frozen doc SPLADE: naver/splade-v3 ...
+
+Loading weights:   0%|          | 0/204 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 204/204 [00:00<00:00, 48857.31it/s]
+Loading ShallowSpladeQuery (2 layers) from /home/capemox/projects/sae-smo-splade/checkpoints_splade-v3/splade_shallow_last2/best_NanoMSMARCO.pt ...
+
+Loading weights:   0%|          | 0/204 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 204/204 [00:00<00:00, 28697.28it/s]
+Exception in thread Thread-auto_conversion:
+Traceback (most recent call last):
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+    self.run()
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 953, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 117, in auto_conversion
+    raise e
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 96, in auto_conversion
+    sha = get_conversion_pr_reference(api, pretrained_model_name_or_path, **cached_file_kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 77, in get_conversion_pr_reference
+    raise OSError(
+OSError: Could not create safetensors conversion PR. The repo does not appear to have a file named pytorch_model.bin or model.safetensors.If you are loading with variant, use `use_safetensors=False` to load the original model.
+Exception in thread Thread-auto_conversion:
+Traceback (most recent call last):
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+    self.run()
+  File "/home/capemox/.local/share/uv/python/cpython-3.10.16-linux-x86_64-gnu/lib/python3.10/threading.py", line 953, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 117, in auto_conversion
+    raise e
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 96, in auto_conversion
+    sha = get_conversion_pr_reference(api, pretrained_model_name_or_path, **cached_file_kwargs)
+  File "/home/capemox/projects/sae-smo-splade/.venv/lib/python3.10/site-packages/transformers/safetensors_conversion.py", line 77, in get_conversion_pr_reference
+    raise OSError(
+OSError: Could not create safetensors conversion PR. The repo does not appear to have a file named pytorch_model.bin or model.safetensors.If you are loading with variant, use `use_safetensors=False` to load the original model.
+  Step: 10000
+
+────────────────────────────────────────────────────────────
+[nfcorpus]
+  Loading queries and qrels ...
+  323 queries, 323 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/323
+  queries: 128/323
+  queries: 192/323
+  queries: 256/323
+  queries: 320/323
+  queries: 323/323
+  Retrieving from pre-built index (3,633 docs) ...
+
+  scoring:   0%|          | 0.00/3.63k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 3.63k/3.63k [00:00<00:00, 29.7kdoc/s]
+  scoring: 100%|██████████| 3.63k/3.63k [00:00<00:00, 29.7kdoc/s]
+  NDCG@10: 0.3275  MRR@10: 0.5445  [index (3,633 docs)]
+
+────────────────────────────────────────────────────────────
+[scifact]
+  Loading queries and qrels ...
+  300 queries, 300 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/300
+  queries: 128/300
+  queries: 192/300
+  queries: 256/300
+  queries: 300/300
+  Retrieving from pre-built index (5,183 docs) ...
+
+  scoring:   0%|          | 0.00/5.18k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 5.18k/5.18k [00:00<00:00, 198kdoc/s]
+  NDCG@10: 0.5999  MRR@10: 0.5745  [index (5,183 docs)]
+
+────────────────────────────────────────────────────────────
+[arguana]
+  Loading queries and qrels ...
+  1406 queries, 1406 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1406
+  queries: 128/1406
+  queries: 192/1406
+  queries: 256/1406
+  queries: 320/1406
+  queries: 384/1406
+  queries: 448/1406
+  queries: 512/1406
+  queries: 576/1406
+  queries: 640/1406
+  queries: 704/1406
+  queries: 768/1406
+  queries: 832/1406
+  queries: 896/1406
+  queries: 960/1406
+  queries: 1024/1406
+  queries: 1088/1406
+  queries: 1152/1406
+  queries: 1216/1406
+  queries: 1280/1406
+  queries: 1344/1406
+  queries: 1406/1406
+  Retrieving from pre-built index (8,674 docs) ...
+
+  scoring:   0%|          | 0.00/8.67k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 8.67k/8.67k [00:00<00:00, 124kdoc/s]
+  NDCG@10: 0.3106  MRR@10: 0.2087  [index (8,674 docs)]
+
+────────────────────────────────────────────────────────────
+[scidocs]
+  Loading queries and qrels ...
+  1000 queries, 1000 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/1000
+  queries: 128/1000
+  queries: 192/1000
+  queries: 256/1000
+  queries: 320/1000
+  queries: 384/1000
+  queries: 448/1000
+  queries: 512/1000
+  queries: 576/1000
+  queries: 640/1000
+  queries: 704/1000
+  queries: 768/1000
+  queries: 832/1000
+  queries: 896/1000
+  queries: 960/1000
+  queries: 1000/1000
+  Retrieving from pre-built index (25,657 docs) ...
+
+  scoring:   0%|          | 0.00/25.7k [00:00<?, ?doc/s]
+  scoring: 100%|██████████| 25.7k/25.7k [00:00<00:00, 184kdoc/s]
+  scoring: 100%|██████████| 25.7k/25.7k [00:00<00:00, 183kdoc/s]
+  NDCG@10: 0.1439  MRR@10: 0.2526  [index (25,657 docs)]
+
+────────────────────────────────────────────────────────────
+[fiqa]
+  Loading queries and qrels ...
+  648 queries, 648 with relevance judgments
+  Encoding queries with query model ...
+  queries: 64/648
+  queries: 128/648
+  queries: 192/648
+  queries: 256/648
+  queries: 320/648
+  queries: 384/648
+  queries: 448/648
+  queries: 512/648
+  queries: 576/648
+  queries: 640/648
+  queries: 648/648
+  Retrieving from pre-built index (57,638 docs) ...
+
+  scoring:   0%|          | 0.00/57.6k [00:00<?, ?doc/s]
+  scoring:  87%|████████▋ | 50.0k/57.6k [00:00<00:00, 184kdoc/s]
+  scoring: 100%|██████████| 57.6k/57.6k [00:00<00:00, 193kdoc/s]
+  NDCG@10: 0.2974  MRR@10: 0.3697  [index (57,638 docs)]
+
+============================================================
+Checkpoint : /home/capemox/projects/sae-smo-splade/checkpoints_splade-v3/splade_shallow_last2/best_NanoMSMARCO.pt
+Stage      : splade_shallow
+────────────────────────────────────────────────────────────
+Dataset                 NDCG@10     MRR@10
+──────────────────────────────────────────
+nfcorpus                 0.3275     0.5445
+scifact                  0.5999     0.5745
+arguana                  0.3106     0.2087
+scidocs                  0.1439     0.2526
+fiqa                     0.2974     0.3697
+──────────────────────────────────────────
+Average                  0.3359     0.3900
+============================================================

@@ -1,0 +1,63 @@
+splade_shallow:
+  doc_splade_hf_id: naver/splade-v3
+  n_layers: 3
+  factorize_embeddings: false
+  factorized_embedding_dim: 256
+  factorization_init: svd
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  eval_batch_size: 32
+  freeze_warmup_steps: 5000
+  head_lr_scale: 0.1
+  freeze_head_after_warmup: false
+  alignment_steps: 50000
+  alignment_lr: 0.0002
+  weight_decay: 0.01
+  fp16: true
+  nway: 8
+  use_contrastive: false
+  log_ranking_metrics: false
+  contrastive_coeff: 0.1
+  contrastive_temperature: 1.0
+  lambda_q: 0.0002
+  lambda_q_warmup_steps: 5000
+  log_every: 200
+  save_every: 10000
+  output_dir: splade_shallow
+lion_shallow:
+  lion_hf_id: hzeng/Lion-SP-1B-llama3-marco-mntp
+  factorize_embeddings: true
+  factorized_embedding_dim: 2048
+  factorization_init: svd
+  doc_max_length: 128
+  query_max_length: 32
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_batch_size: 4
+  freeze_warmup_steps: 5000
+  head_lr_scale: 0.1
+  freeze_head_after_warmup: true
+  alignment_steps: 50000
+  alignment_lr: 0.0002
+  align_loss_kind: mse
+  weight_decay: 0.01
+  fp16: true
+  nway: 8
+  contrastive_coeff: 0.0
+  contrastive_temperature: 1.0
+  lambda_q: 0.001
+  lambda_q_warmup_steps: 5000
+  log_every: 200
+  save_every: 10000
+  output_dir: lion_shallow_first3_factorized_d2048
+  layer_indices:
+  - 0
+  - 1
+  - 2
+eval:
+  datasets:
+  - zeta-alpha-ai/NanoMSMARCO
+  - zeta-alpha-ai/NanoNFCorpus
+  batch_size: 32

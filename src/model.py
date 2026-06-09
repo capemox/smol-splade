@@ -1,6 +1,7 @@
 """SAE and SAE-SPLADE model definitions (pure PyTorch, no framework dependencies)."""
 
 import math
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -649,6 +650,88 @@ class ShallowFactorizedSpladeQuery(ShallowSpladeQuery):
         return emb.lexical_embeddings.weight.numel() + emb.up_project.weight.numel() + emb.num_embeddings
 
 
+class StaticSpladeQuery(nn.Module):
+    """Zero-layer SPLADE query encoder: one learnable weight per vocabulary token.
+
+    Query encoding is pure bag-of-words — O(seq_len) compute, no transformer layers.
+    Each output dimension gets ``relu(weight[token_id])`` if that token appears in
+    the query, else 0. Compatible with any FrozenDocSPLADE output space that uses
+    the same tokenizer (e.g. naver/splade-v3).
+
+    Trained by MSE distillation against the frozen full doc SPLADE applied to
+    queries, so the weights converge to something like per-token IDF scores scaled
+    to the SPLADE output range.
+    """
+
+    def __init__(self, hf_id: str):
+        super().__init__()
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
+        self.vocab_size: int = self.tokenizer.vocab_size
+        self.weight = nn.Parameter(torch.ones(self.vocab_size))
+
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        override_k: int = 0,
+    ) -> torch.Tensor:
+        """Return sparse query vectors ``[B, vocab_size]``.
+
+        Each present token contributes ``relu(weight[token_id])`` to its
+        vocabulary dimension; absent tokens contribute 0.
+        """
+        B = input_ids.size(0)
+        presence = torch.zeros(B, self.vocab_size, device=input_ids.device, dtype=torch.float32)
+        presence.scatter_(1, input_ids, attention_mask.float())
+        return presence * torch.relu(self.weight)
+
+    def trainable_param_count(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class StaticLionQuery(nn.Module):
+    """Zero-layer Lion sparse query encoder: one learnable weight per vocabulary token.
+
+    Compatible with FrozenLionSPLADE output space (same Llama-3 tokenizer and vocab).
+    Trained by distillation against the frozen full Lion doc encoder applied to queries.
+    """
+
+    def __init__(self, hf_id: str):
+        super().__init__()
+        import json
+        from huggingface_hub import hf_hub_download
+        from transformers import AutoTokenizer, AutoConfig
+
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer.padding_side = "right"
+
+        adapter_cfg_path = hf_hub_download(hf_id, "adapter_config.json")
+        with open(adapter_cfg_path) as f:
+            adapter_cfg = json.load(f)
+        base_model_path = adapter_cfg["base_model_name_or_path"]
+        base_config = AutoConfig.from_pretrained(base_model_path)
+        self.vocab_size: int = base_config.vocab_size
+
+        self.weight = nn.Parameter(torch.ones(self.vocab_size))
+
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        override_k: int = 0,
+    ) -> torch.Tensor:
+        B = input_ids.size(0)
+        presence = torch.zeros(B, self.vocab_size, device=input_ids.device, dtype=torch.float32)
+        presence.scatter_(1, input_ids, attention_mask.float())
+        return presence * torch.relu(self.weight)
+
+    def trainable_param_count(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 class FrozenLionSPLADE(nn.Module):
     """Frozen Lion-SP SPLADE encoder (decoder-only Llama, bidirectional).
 
@@ -818,17 +901,13 @@ class ShallowLionQuery(nn.Module):
             p.requires_grad_(True)
 
     def unfreeze_all(self) -> None:
-        """Unfreeze body + head LoRA adapter (if any); keep embed_tokens and base lm_head frozen.
+        """Unfreeze body plus lexical embedding/head parameters.
 
-        embed_tokens (262M) and the full lm_head weight (262M) each cost ~2 GB of AdamW
-        optimizer state on an 8 GB GPU — always keep them frozen. Only the lightweight
-        LoRA adapter (if installed) trains in place of the full lm_head.
+        This is memory-heavy for Lion, but it is the explicit head-unfrozen
+        ablation path. The normal frozen-head runs keep using ``freeze_for_warmup``.
         """
         for p in self.parameters():
             p.requires_grad_(True)
-        # embed_tokens stays frozen — 262M params × 8 bytes AdamW = 2 GB alone
-        self.model.model.embed_tokens.weight.requires_grad_(False)
-        # lm_head base weight stays frozen if LoRA is installed
         if isinstance(self.model.lm_head, LoRALinear):
             self.model.lm_head.linear.weight.requires_grad_(False)
 

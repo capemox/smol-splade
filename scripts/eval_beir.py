@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""BEIR evaluation for VocabTransplant query models.
+"""BEIR evaluation for shallow/pruned query models.
 
 For each dataset, encodes queries with either a trained query checkpoint or the
 frozen doc SPLADE (ceiling), then retrieves against:
@@ -13,13 +13,13 @@ Usage:
     uv run scripts/eval_beir.py --doc_only
 
     # Evaluate a query checkpoint:
-    uv run scripts/eval_beir.py --checkpoint checkpoints_ettin-encoder-17m/vocab_transplant_align/align_final.pt
+    uv run scripts/eval_beir.py --stage splade_shallow --checkpoint checkpoints_splade-v3/splade_shallow/align_final.pt
 
     # Specific datasets only:
     uv run scripts/eval_beir.py --checkpoint <ckpt> --datasets nfcorpus scifact fiqa
 
-    # Using vocab_transplant_align config section:
-    uv run scripts/eval_beir.py --checkpoint <ckpt> --config_section vocab_transplant_align
+    # Lion:
+    uv run scripts/eval_beir.py --stage lion_shallow --checkpoint checkpoints_lion_shallow/lion_shallow/align_final.pt
 """
 
 import argparse
@@ -258,42 +258,83 @@ def _infer_factor_dim(state: dict, config_fallback: int) -> int:
     return config_fallback
 
 
+def _infer_layer_indices(state: dict) -> list[int] | None:
+    import re
+    patterns = [
+        re.compile(r"encoder\.layer\.(\d+)\."),   # BERT / SPLADE
+        re.compile(r"\.layers\.(\d+)\."),           # LLaMA / Lion
+    ]
+    for pat in patterns:
+        indices = sorted({int(m.group(1)) for k in state for m in [pat.search(k)] if m})
+        if indices:
+            return indices
+    return None
+
+
 def _load_shallow_query_model(stage: str, sc: dict, checkpoint: str, device):
     ckpt = torch.load(checkpoint, map_location="cpu")
     state = ckpt["model"]
 
-    if stage == "splade_shallow_align":
-        from model import ShallowSpladeQuery
-        model = ShallowSpladeQuery(
-            sc["doc_splade_hf_id"], sc["n_layers"],
-            layer_indices=sc.get("layer_indices"),
-        )
-        print(f"Loading ShallowSpladeQuery ({sc['n_layers']} layers) from {checkpoint} ...")
-    elif stage in ("splade_shallow_factorized_align", "splade_shallow_factorized_spaced_align"):
-        from model import ShallowFactorizedSpladeQuery
-        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
-        print(f"Loading ShallowFactorizedSpladeQuery ({sc['n_layers']} layers, factor_dim={factor_dim}) from {checkpoint} ...")
-        model = ShallowFactorizedSpladeQuery(
-            sc["doc_splade_hf_id"], sc["n_layers"],
-            factorized_embedding_dim=factor_dim, init="random",
-            layer_indices=sc.get("layer_indices"),
-        )
-    elif stage in ("lion_shallow_align", "lion_shallow_align_4l"):
-        from model import ShallowLionQuery
-        print(f"Loading ShallowLionQuery ({sc['n_layers']} layers) from {checkpoint} ...")
-        model = ShallowLionQuery(
-            sc["lion_hf_id"], sc["n_layers"],
-            layer_indices=sc.get("layer_indices"),
-        )
-    elif stage in ("lion_shallow_factorized_align", "lion_shallow_factorized_align_3l", "lion_shallow_factorized_align_4l", "lion_shallow_factorized_spaced_align"):
-        from model import ShallowFactorizedLionQuery
-        factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
-        print(f"Loading ShallowFactorizedLionQuery ({sc['n_layers']} layers, factor_dim={factor_dim}) from {checkpoint} ...")
-        model = ShallowFactorizedLionQuery(
-            sc["lion_hf_id"], sc["n_layers"],
-            factorized_embedding_dim=factor_dim, init="random",
-            layer_indices=sc.get("layer_indices"),
-        )
+    if stage == "splade_static":
+        from model import StaticSpladeQuery
+        print(f"Loading StaticSpladeQuery from {checkpoint} ...")
+        model = StaticSpladeQuery(sc["doc_splade_hf_id"])
+        model.load_state_dict(state)
+        model.to(device).eval()
+        print(f"  Step: {ckpt.get('step', 'unknown')}")
+        return model, model.tokenizer
+
+    if stage == "lion_static":
+        from model import StaticLionQuery
+        print(f"Loading StaticLionQuery from {checkpoint} ...")
+        model = StaticLionQuery(sc["lion_hf_id"])
+        model.load_state_dict(state)
+        model.to(device).eval()
+        print(f"  Step: {ckpt.get('step', 'unknown')}")
+        return model, model.tokenizer
+
+    layer_indices = _infer_layer_indices(state)
+    if layer_indices is not None:
+        n_layers = len(layer_indices)
+    else:
+        layer_indices = sc.get("layer_indices")
+        n_layers = len(layer_indices) if layer_indices is not None else sc["n_layers"]
+    factorized = bool(sc.get("factorize_embeddings", False))
+
+    if stage == "splade_shallow":
+        if factorized:
+            from model import ShallowFactorizedSpladeQuery
+            factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
+            print(f"Loading ShallowFactorizedSpladeQuery ({n_layers} layers, factor_dim={factor_dim}) from {checkpoint} ...")
+            model = ShallowFactorizedSpladeQuery(
+                sc["doc_splade_hf_id"], n_layers,
+                factorized_embedding_dim=factor_dim, init="random",
+                layer_indices=layer_indices,
+            )
+        else:
+            from model import ShallowSpladeQuery
+            print(f"Loading ShallowSpladeQuery ({n_layers} layers) from {checkpoint} ...")
+            model = ShallowSpladeQuery(
+                sc["doc_splade_hf_id"], n_layers,
+                layer_indices=layer_indices,
+            )
+    elif stage == "lion_shallow":
+        if factorized:
+            from model import ShallowFactorizedLionQuery
+            factor_dim = _infer_factor_dim(state, sc.get("factorized_embedding_dim", 128))
+            print(f"Loading ShallowFactorizedLionQuery ({n_layers} layers, factor_dim={factor_dim}) from {checkpoint} ...")
+            model = ShallowFactorizedLionQuery(
+                sc["lion_hf_id"], n_layers,
+                factorized_embedding_dim=factor_dim, init="random",
+                layer_indices=layer_indices,
+            )
+        else:
+            from model import ShallowLionQuery
+            print(f"Loading ShallowLionQuery ({n_layers} layers) from {checkpoint} ...")
+            model = ShallowLionQuery(
+                sc["lion_hf_id"], n_layers,
+                layer_indices=layer_indices,
+            )
     else:
         raise ValueError(f"Unsupported shallow stage: {stage}")
 
@@ -318,22 +359,8 @@ def main():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
         "--stage",
-        default="vocab_transplant",
-        choices=[
-            "vocab_transplant",
-            "vocab_transplant_align",
-            "splade_shallow_align",
-            "splade_shallow_factorized_align",
-            "splade_shallow_factorized_spaced_align",
-            "lion_shallow_align",
-            "lion_shallow_factorized_align",
-            "lion_shallow_factorized_align_3l",
-            "lion_shallow_factorized_align_4l",
-            "lion_shallow_align_4l",
-            "lion_shallow_factorized_spaced_align",
-            "lion_shallow_factorized_cosine_align",
-            "lion_shallow_factorized_spaced_contrastive_align",
-        ],
+        default="splade_shallow",
+        choices=["splade_shallow", "lion_shallow", "splade_static", "lion_static"],
         help="Config section to load doc encoder and query model from",
     )
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS,
@@ -366,40 +393,25 @@ def main():
         doc_hf_id = sc["lion_hf_id"]
         print(f"Loading frozen Lion doc encoder: {doc_hf_id} ...")
         doc_splade = FrozenLionSPLADE(doc_hf_id)
+        # Lion (1B params) is left on CPU until actually needed. Moving it to the
+        # GPU unconditionally fills all VRAM and leaves nothing for indexed-retrieval
+        # dense chunks (~2 GB per 4096-doc tile at vocab_size=128256).
+        _doc_splade_on_device = False
     else:
         from model import FrozenDocSPLADE
-        doc_hf_id = sc.get("doc_splade_hf_id") or cfg["vocab_transplant"]["doc_splade_hf_id"]
+        doc_hf_id = sc["doc_splade_hf_id"]
         print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
         doc_splade = FrozenDocSPLADE(doc_hf_id)
-    doc_splade.to(device)
+        doc_splade.to(device)
+        _doc_splade_on_device = True
     doc_splade.eval()
 
     query_model     = None
     query_tokenizer = None
     if not args.doc_only:
-        if args.stage in ("vocab_transplant", "vocab_transplant_align"):
-            from model import VocabTransplantQuerySPLADE
-            from transformers import AutoTokenizer
-            transplant_dir = str(
-                Path(f"checkpoints_{sc['query_hf_id'].split('/')[-1]}") / sc["transplant_dir"]
-            )
-            if not Path(transplant_dir, "config.json").exists():
-                raise SystemExit(
-                    f"Transplant directory not found: {transplant_dir}\n"
-                    f"Check {args.stage}.query_hf_id and .transplant_dir in config.yaml."
-                )
-            print(f"Loading VocabTransplantQuerySPLADE from {args.checkpoint} ...")
-            query_model = VocabTransplantQuerySPLADE(transplant_dir)
-            ckpt = torch.load(args.checkpoint, map_location="cpu")
-            query_model.load_state_dict(ckpt["model"])
-            query_model.to(device)
-            query_model.eval()
-            query_tokenizer = AutoTokenizer.from_pretrained(transplant_dir)
-            print(f"  Step: {ckpt.get('step', 'unknown')}")
-        else:
-            query_model, query_tokenizer = _load_shallow_query_model(
-                args.stage, sc, args.checkpoint, device
-            )
+        query_model, query_tokenizer = _load_shallow_query_model(
+            args.stage, sc, args.checkpoint, device
+        )
 
     base_index_dir = Path(args.index_dir)
     all_results: dict = {}
@@ -418,6 +430,9 @@ def main():
 
         # Encode queries
         if args.doc_only:
+            if not _doc_splade_on_device:
+                doc_splade.to(device)
+                _doc_splade_on_device = True
             print(f"  Encoding queries with doc encoder (ceiling) ...")
             query_vecs = encode_with_doc_splade(
                 doc_splade, query_texts, sc["query_max_length"], args.encode_batch_size
@@ -456,6 +471,9 @@ def main():
                 f"  (Build an index for faster repeated eval: "
                 f"uv run scripts/build_beir_index.py --stage {args.stage} --datasets {name})"
             )
+            if not _doc_splade_on_device:
+                doc_splade.to(device)
+                _doc_splade_on_device = True
             from datasets import load_dataset
             corpus_ds    = load_dataset(f"BeIR/{name}", "corpus", split="corpus")
             corpus_ids   = [str(r["_id"]) for r in corpus_ds]

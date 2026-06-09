@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Build a sparse SPLADE doc index for the full MSMARCO passage corpus.
+"""Build a sparse document index for the full MSMARCO passage corpus.
 
 Streams Tevatron/msmarco-passage-corpus, encodes each passage with the frozen
 doc SPLADE (bf16 autocast on GPU), keeps only nonzero terms, and writes
 CSR-format shards to ``data/msmarco_index/``.
 
-The index is checkpoint-independent: it depends only on the doc SPLADE
-specified in config.yaml ``vocab_transplant.doc_splade_hf_id``. Any number of
+The index is checkpoint-independent: it depends only on the frozen document
+encoder specified by the selected config section. Any number of
 query checkpoints can be evaluated against the same index without re-encoding.
 
 Resumable: if the script is interrupted, re-running picks up at the next shard
@@ -122,16 +122,8 @@ def main():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
         "--stage",
-        default="vocab_transplant",
-        choices=[
-            "vocab_transplant",
-            "splade_shallow_align",
-            "splade_shallow_factorized_align",
-            "splade_shallow_factorized_spaced_align",
-            "lion_shallow_align",
-            "lion_shallow_factorized_align",
-            "lion_shallow_factorized_spaced_align",
-        ],
+        default="splade_shallow",
+        choices=["splade_shallow", "lion_shallow"],
         help="Config section whose frozen document encoder should build the index",
     )
     parser.add_argument(
@@ -166,8 +158,8 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     sc = cfg[args.stage]
-    corpus_dataset = cfg["sae"]["corpus_dataset"]
-    text_field = cfg["sae"].get("corpus_text_field", "text")
+    corpus_dataset = cfg.get("data", {}).get("corpus_dataset", "Tevatron/msmarco-passage-corpus")
+    text_field = cfg.get("data", {}).get("corpus_text_field", "text")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -179,13 +171,13 @@ def main():
         doc_splade = FrozenLionSPLADE(doc_hf_id)
     else:
         from model import FrozenDocSPLADE
-        doc_hf_id = sc.get("doc_splade_hf_id") or cfg["vocab_transplant"]["doc_splade_hf_id"]
+        doc_hf_id = sc["doc_splade_hf_id"]
         print(f"Loading frozen doc SPLADE: {doc_hf_id} ...")
         doc_splade = FrozenDocSPLADE(doc_hf_id)
     doc_splade.to(device)
     doc_splade.eval()
     vocab_size = doc_splade.vocab_size
-    doc_max_length = int(sc.get("doc_max_length", cfg["vocab_transplant"]["doc_max_length"]))
+    doc_max_length = int(sc["doc_max_length"])
 
     index_dir = Path(args.index_dir)
     index_dir.mkdir(parents=True, exist_ok=True)

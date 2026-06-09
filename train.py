@@ -2496,7 +2496,7 @@ def train_splade_shallow_align(
     cfg: dict,
     resume: str | None = None,
     init_from: str | None = None,
-    section: str = "splade_shallow_align",
+    section: str = "splade_shallow",
     factorized: bool = False,
 ):
     """Layer-truncated SPLADE query encoder, distilled against the full doc encoder.
@@ -2525,7 +2525,12 @@ def train_splade_shallow_align(
 
     from model import FrozenDocSPLADE, ShallowFactorizedSpladeQuery, ShallowSpladeQuery
     from eval import evaluate_asymmetric
-    from data import make_ranking_distill_loader
+    from data import (
+        ColBERTDistillationDataset,
+        build_corpus_lookup,
+        build_query_lookup,
+        make_ranking_distill_loader,
+    )
 
     if section not in cfg:
         raise SystemExit(f"[shallow] config.yaml is missing a `{section}:` section.")
@@ -2533,7 +2538,11 @@ def train_splade_shallow_align(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    n_layers            = int(sc["n_layers"])
+    layer_indices = sc.get("layer_indices")
+    if layer_indices is not None:
+        layer_indices = [int(idx) for idx in layer_indices]
+    n_layers            = len(layer_indices) if layer_indices is not None else int(sc["n_layers"])
+    factorized          = bool(sc.get("factorize_embeddings", factorized))
     alignment_steps     = int(sc.get("alignment_steps", 50_000))
     freeze_warmup_steps = int(sc.get("freeze_warmup_steps", 10_000))
     align_lr            = float(sc.get("alignment_lr", 5e-4))
@@ -2541,6 +2550,8 @@ def train_splade_shallow_align(
     fp16                = bool(sc.get("fp16", True))
     lambda_q              = float(sc.get("lambda_q", 0.0))
     lambda_q_warmup_steps = int(sc.get("lambda_q_warmup_steps", 0))
+    align_loss_kind       = sc.get("align_loss_kind", "mse")
+    kd_temperature        = float(sc.get("kd_temperature", 1.0))
     use_contrastive       = bool(sc.get("use_contrastive", sc.get("contrastive_coeff", 0.0) > 0.0))
     contrastive_coeff     = float(sc.get("contrastive_coeff", 0.0)) if use_contrastive else 0.0
     contrastive_temperature = float(sc.get("contrastive_temperature", 1.0))
@@ -2552,6 +2563,10 @@ def train_splade_shallow_align(
         raise SystemExit("[shallow] alignment_steps must be > 0.")
     if freeze_warmup_steps < 0 or freeze_warmup_steps > alignment_steps:
         raise SystemExit("[shallow] freeze_warmup_steps must be in [0, alignment_steps].")
+    if align_loss_kind not in {"mse", "cosine", "kd", "margin_mse"}:
+        raise SystemExit("[shallow] align_loss_kind must be one of: mse, cosine, kd, margin_mse.")
+    if align_loss_kind == "kd" and kd_temperature <= 0.0:
+        raise SystemExit("[shallow] kd_temperature must be > 0.")
 
     if contrastive_temperature <= 0.0:
         raise SystemExit("[shallow] contrastive_temperature must be > 0.")
@@ -2559,6 +2574,7 @@ def train_splade_shallow_align(
         f"[shallow] doc={sc['doc_splade_hf_id']} | n_layers={n_layers} "
         f"| freeze_warmup={freeze_warmup_steps} | alignment={alignment_steps} "
         f"| lr={align_lr} | nway={nway} | lambda_q={lambda_q} "
+        f"| align_loss_kind={align_loss_kind} | kd_temperature={kd_temperature} "
         f"| use_contrastive={use_contrastive} | contrastive_coeff={contrastive_coeff} "
         f"| log_ranking_metrics={log_ranking_metrics} | grad_accum={grad_accum} "
         f"| freeze_head_after_warmup={freeze_head_after_warmup}"
@@ -2569,9 +2585,7 @@ def train_splade_shallow_align(
     doc_splade = FrozenDocSPLADE(sc["doc_splade_hf_id"]); doc_splade.to(device); doc_splade.eval()
 
     print(f"[shallow] Building shallow query model from same checkpoint, keeping {n_layers} layers …")
-    layer_indices = sc.get("layer_indices")
     if layer_indices is not None:
-        layer_indices = [int(idx) for idx in layer_indices]
         print(f"[shallow] Using explicit doc-layer indices for query body: {layer_indices}")
     if factorized:
         factor_dim = int(sc.get("factorized_embedding_dim", 128))
@@ -2648,9 +2662,52 @@ def train_splade_shallow_align(
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(out_dir / "tensorboard")
 
-    ranking_loader = make_ranking_distill_loader(
-        nway=nway, batch_size=sc["batch_size"],
-    )
+    if align_loss_kind in {"kd", "margin_mse"}:
+        distil_data_path = sc.get("distil_data_path", "data/colbertv2_msmarco_64way.json")
+        corpus_dataset = sc.get("corpus_dataset", "Tevatron/msmarco-passage-corpus")
+        corpus_text_field = sc.get("corpus_text_field", "text")
+        queries_dataset = sc.get("queries_dataset", "Tevatron/msmarco-passage")
+        print(
+            f"[shallow] Loading ColBERT score supervision: {distil_data_path} "
+            f"(queries={queries_dataset}, corpus={corpus_dataset})"
+        )
+        corpus = build_corpus_lookup(corpus_dataset, corpus_text_field)
+        queries = build_query_lookup(queries_dataset)
+        colbert_dataset = ColBERTDistillationDataset(
+            distil_data_path, corpus, queries, nway=nway
+        )
+
+        def colbert_loader():
+            batch_q: list[str] = []
+            batch_p: list[str] = []
+            batch_scores: list[list[float]] = []
+            while True:
+                for item in colbert_dataset:
+                    batch_q.append(item["query"])
+                    batch_p.extend(p.get("text", "") for p in item["passages"])
+                    batch_scores.append(item["teacher_scores"])
+                    if len(batch_q) == sc["batch_size"]:
+                        yield (
+                            list(batch_q),
+                            list(batch_p),
+                            torch.tensor(batch_scores, dtype=torch.float32, device=device),
+                        )
+                        batch_q.clear()
+                        batch_p.clear()
+                        batch_scores.clear()
+
+        ranking_loader = colbert_loader()
+    else:
+        base_loader = make_ranking_distill_loader(
+            nway=nway, batch_size=sc["batch_size"],
+        )
+
+        def ranking_loader_with_no_scores():
+            while True:
+                q_texts, p_texts = next(base_loader)
+                yield q_texts, p_texts, None
+
+        ranking_loader = ranking_loader_with_no_scores()
 
     # ── Initial eval ──────────────────────────────────────────────────
     if start_step == 0 and cfg.get("eval", {}).get("datasets"):
@@ -2668,6 +2725,8 @@ def train_splade_shallow_align(
     t0 = time.time()
     print(f"[shallow] Training loop ({alignment_steps - start_step} steps remaining) …")
     optimizer.zero_grad()
+    best_nanoms = float("-inf")
+    best_nanoms_path = out_dir / "best_NanoMSMARCO.pt"
 
     for step in range(start_step, alignment_steps):
         # ── Phase boundary: unfreeze everything ───────────────────────
@@ -2702,7 +2761,7 @@ def train_splade_shallow_align(
             )
 
         do_log = (step + 1) % sc["log_every"] == 0
-        q_texts, p_texts = next(ranking_loader)
+        q_texts, p_texts, teacher_scores = next(ranking_loader)
         B_actual = len(q_texts)
         q_enc = query_tokenizer(
             q_texts, max_length=sc["query_max_length"],
@@ -2716,7 +2775,11 @@ def train_splade_shallow_align(
             t_q_vecs = doc_splade.encode(q_texts, sc["query_max_length"]).float()  # [B, V]
             # Passage vecs are needed for contrastive training and optional p@1 logging.
             # Encode in chunks to avoid OOM when training batch_size is large.
-            need_passage_vecs = contrastive_coeff > 0.0 or (do_log and log_ranking_metrics)
+            need_passage_vecs = (
+                align_loss_kind in {"kd", "margin_mse"}
+                or contrastive_coeff > 0.0
+                or (do_log and log_ranking_metrics)
+            )
             if need_passage_vecs:
                 enc_bs = sc.get("eval_batch_size", 32)
                 p_vecs = torch.cat([
@@ -2737,10 +2800,34 @@ def train_splade_shallow_align(
             q_relu = q_logits + (F.relu(q_logits) - q_logits).detach()
             q_vecs = torch.log1p(q_relu)
 
-            # Direct vector MSE against teacher SPLADE query vecs.
-            # Sum over vocab dims, mean over batch — keeps per-dim gradient at O(1/B)
-            # instead of O(1/(B*V)), which is strong enough to revive dead dims from zero.
-            rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+            if align_loss_kind == "mse":
+                # Direct vector MSE against teacher SPLADE query vecs.
+                # Sum over vocab dims, mean over batch — keeps per-dim gradient at O(1/B)
+                # instead of O(1/(B*V)), which is strong enough to revive dead dims from zero.
+                rank_loss = ((q_vecs - t_q_vecs.to(q_vecs.dtype)) ** 2).sum(dim=-1).mean()
+            elif align_loss_kind == "cosine":
+                rank_loss = (1.0 - F.cosine_similarity(q_vecs.float(), t_q_vecs.float())).mean()
+            elif align_loss_kind == "kd":
+                if teacher_scores is None:
+                    raise RuntimeError("align_loss_kind=kd requires ColBERT teacher scores.")
+                passage_vecs_3d = p_vecs_3d.to(q_vecs.dtype)
+                student_scores = (q_vecs.unsqueeze(1) * passage_vecs_3d).sum(-1)
+                T = kd_temperature
+                rank_loss = F.kl_div(
+                    F.log_softmax(student_scores.float() / T, dim=-1),
+                    F.softmax(teacher_scores.float() / T, dim=-1),
+                    reduction="batchmean",
+                ) * (T * T)
+            elif align_loss_kind == "margin_mse":
+                if teacher_scores is None:
+                    raise RuntimeError("align_loss_kind=margin_mse requires ColBERT teacher scores.")
+                passage_vecs_3d = p_vecs_3d.to(q_vecs.dtype)
+                student_scores = (q_vecs.unsqueeze(1) * passage_vecs_3d).sum(-1)
+                student_margins = student_scores[:, :1] - student_scores[:, 1:]
+                teacher_margins = teacher_scores[:, :1] - teacher_scores[:, 1:]
+                rank_loss = F.mse_loss(student_margins.float(), teacher_margins.float())
+            else:
+                raise RuntimeError(f"Unsupported align_loss_kind: {align_loss_kind}")
             align_loss = rank_loss
             if contrastive_coeff > 0.0:
                 # In-batch contrastive loss: each query's positive passage is
@@ -2811,11 +2898,27 @@ def train_splade_shallow_align(
                 print(f"[shallow] Eval at step {step+1} …")
                 import gc; gc.collect(); torch.cuda.empty_cache()
                 query_model.eval()
-                evaluate_asymmetric(
+                eval_results = evaluate_asymmetric(
                     query_model, query_tokenizer, doc_splade, cfg, device,
                     writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
                     section=section,
                 )
+                nanoms = eval_results.get("NanoMSMARCO", {}).get("query_doc")
+                if nanoms is not None and nanoms > best_nanoms:
+                    best_nanoms = nanoms
+                    torch.save(
+                        {
+                            "model": query_model.state_dict(),
+                            "step": step + 1,
+                            "best_metric": "NanoMSMARCO/query_doc_ndcg@10",
+                            "best_score": best_nanoms,
+                        },
+                        best_nanoms_path,
+                    )
+                    print(
+                        f"  New best NanoMSMARCO query_doc NDCG@10={best_nanoms:.4f} "
+                        f"→ {best_nanoms_path}"
+                    )
                 query_model.train()
                 gc.collect(); torch.cuda.empty_cache()
 
@@ -3149,7 +3252,7 @@ def train_splade_shallow_align_distill(cfg: dict, resume: str | None = None, ini
 def train_lion_shallow_align(
     cfg: dict,
     resume: str | None = None,
-    section: str = "lion_shallow_align",
+    section: str = "lion_shallow",
     factorized: bool = False,
 ):
     """3-layer (or N-layer) Lion-SP-1B query encoder distilled against the full Lion doc encoder.
@@ -3176,7 +3279,11 @@ def train_lion_shallow_align(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    n_layers            = int(sc["n_layers"])
+    layer_indices = sc.get("layer_indices")
+    if layer_indices is not None:
+        layer_indices = [int(idx) for idx in layer_indices]
+    n_layers            = len(layer_indices) if layer_indices is not None else int(sc["n_layers"])
+    factorized          = bool(sc.get("factorize_embeddings", factorized))
     alignment_steps     = int(sc.get("alignment_steps", 50_000))
     freeze_warmup_steps = int(sc.get("freeze_warmup_steps", 5_000))
     head_lr_scale       = float(sc.get("head_lr_scale", 0.1))
@@ -3191,22 +3298,22 @@ def train_lion_shallow_align(
     align_loss_kind      = sc.get("align_loss_kind", "mse")  # "mse" or "cosine"
     contrastive_coeff    = float(sc.get("contrastive_coeff", 0.0))
     contrastive_temperature = float(sc.get("contrastive_temperature", 1.0))
+    gradient_checkpointing = bool(sc.get("gradient_checkpointing", False))
 
     print(
         f"[lion-shallow] lion={sc['lion_hf_id']} | n_layers={n_layers} "
         f"| freeze_warmup={freeze_warmup_steps} | alignment={alignment_steps} "
         f"| lr={align_lr} | head_lr_scale={head_lr_scale} "
         f"| nway={nway} | lambda_q={lambda_q} | grad_accum={grad_accum} "
-        f"| freeze_head_after_warmup={freeze_head_after_warmup}"
+        f"| freeze_head_after_warmup={freeze_head_after_warmup} "
+        f"| gradient_checkpointing={gradient_checkpointing}"
     )
 
     print(f"[lion-shallow] Loading frozen Lion doc encoder …")
     lion_doc = FrozenLionSPLADE(sc["lion_hf_id"]); lion_doc.to(device); lion_doc.eval()
 
     print(f"[lion-shallow] Building {n_layers}-layer shallow Lion query encoder …")
-    layer_indices = sc.get("layer_indices")
     if layer_indices is not None:
-        layer_indices = [int(idx) for idx in layer_indices]
         print(f"[lion-shallow] Using explicit Lion layer indices for query body: {layer_indices}")
     if factorized:
         factor_dim = int(sc.get("factorized_embedding_dim", 128))
@@ -3230,6 +3337,12 @@ def train_lion_shallow_align(
             query_kwargs["layer_indices"] = layer_indices
         query_model = ShallowLionQuery(sc["lion_hf_id"], **query_kwargs)
     query_model.to(device)
+    if gradient_checkpointing:
+        query_model.model.config.use_cache = False
+        query_model.model.gradient_checkpointing_enable()
+        if hasattr(query_model.model, "enable_input_require_grads"):
+            query_model.model.enable_input_require_grads()
+        print("[lion-shallow] Enabled gradient checkpointing.")
     query_tokenizer = query_model.tokenizer
     n_total = sum(p.numel() for p in query_model.parameters())
     print(
@@ -3298,6 +3411,8 @@ def train_lion_shallow_align(
     t0 = time.time()
     print(f"[lion-shallow] Training loop ({alignment_steps - start_step} steps remaining) …")
     optimizer.zero_grad()
+    best_nanoms = float("-inf")
+    best_nanoms_path = out_dir / "best_NanoMSMARCO.pt"
 
     for step in range(start_step, alignment_steps):
         # ── Phase boundary ────────────────────────────────────────────
@@ -3434,11 +3549,27 @@ def train_lion_shallow_align(
             torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
             print(f"  Saved → {ckpt_path}")
             query_model.eval()
-            evaluate_asymmetric(
+            eval_results = evaluate_asymmetric(
                 query_model, query_tokenizer, lion_doc, cfg, device,
                 writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
                 section=section,
             )
+            nanoms = eval_results.get("NanoMSMARCO", {}).get("query_doc")
+            if nanoms is not None and nanoms > best_nanoms:
+                best_nanoms = nanoms
+                torch.save(
+                    {
+                        "model": query_model.state_dict(),
+                        "step": step + 1,
+                        "best_metric": "NanoMSMARCO/query_doc_ndcg@10",
+                        "best_score": best_nanoms,
+                    },
+                    best_nanoms_path,
+                )
+                print(
+                    f"  New best NanoMSMARCO query_doc NDCG@10={best_nanoms:.4f} "
+                    f"→ {best_nanoms_path}"
+                )
             query_model.train()
             gc.collect(); torch.cuda.empty_cache()
 
@@ -3514,26 +3645,472 @@ def train_lion_shallow_spaced_align(cfg: dict, resume: str | None = None):
     )
 
 
+def train_splade_static(cfg: dict, resume: str | None = None):
+    """IDF-style static sparse query encoder: one learnable weight per vocab token.
+
+    Zero transformer layers. Query encoding = tokenize → per-token weight lookup.
+    Supports align_loss_kind: mse | cosine | kd | margin_mse.
+    Reads config from the ``splade_static`` section.
+    """
+    import gc
+    import torch.nn.functional as F
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+
+    from model import FrozenDocSPLADE, StaticSpladeQuery
+    from eval import evaluate_asymmetric
+    from data import make_ranking_distill_loader, ColBERTDistillationDataset, build_corpus_lookup, build_query_lookup
+
+    if "splade_static" not in cfg:
+        raise SystemExit("[static] config.yaml is missing a `splade_static:` section.")
+    sc = cfg["splade_static"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    alignment_steps  = int(sc.get("alignment_steps", 10_000))
+    lr               = float(sc.get("alignment_lr", 1e-3))
+    weight_decay     = float(sc.get("weight_decay", 0.01))
+    fp16             = bool(sc.get("fp16", True))
+    lambda_q         = float(sc.get("lambda_q", 0.0))
+    align_loss_kind  = sc.get("align_loss_kind", "mse")
+    kd_temperature   = float(sc.get("kd_temperature", 1.0))
+    nway             = int(sc.get("nway", 8))
+
+    if align_loss_kind not in {"mse", "cosine", "kd", "margin_mse"}:
+        raise SystemExit(f"[static] align_loss_kind must be one of: mse, cosine, kd, margin_mse.")
+
+    print(
+        f"[static] doc={sc['doc_splade_hf_id']} | steps={alignment_steps} "
+        f"| lr={lr} | lambda_q={lambda_q} | loss={align_loss_kind}"
+    )
+
+    doc_splade = FrozenDocSPLADE(sc["doc_splade_hf_id"])
+    doc_splade.to(device).eval()
+
+    query_model = StaticSpladeQuery(sc["doc_splade_hf_id"])
+    query_model.to(device)
+    query_tokenizer = query_model.tokenizer
+    print(f"[static] trainable params: {query_model.trainable_param_count():,}")
+
+    if align_loss_kind in {"kd", "margin_mse"}:
+        distil_data_path = sc.get("distil_data_path", "data/colbertv2_msmarco_64way.json")
+        corpus_dataset   = sc.get("corpus_dataset", "Tevatron/msmarco-passage-corpus")
+        corpus_text_field = sc.get("corpus_text_field", "text")
+        queries_dataset  = sc.get("queries_dataset", "Tevatron/msmarco-passage")
+        print(
+            f"[static] Loading ColBERT score supervision: {distil_data_path} "
+            f"(queries={queries_dataset}, corpus={corpus_dataset})"
+        )
+        corpus = build_corpus_lookup(corpus_dataset, corpus_text_field)
+        queries = build_query_lookup(queries_dataset)
+        colbert_dataset = ColBERTDistillationDataset(distil_data_path, corpus, queries, nway=nway)
+
+        def _colbert_loader():
+            batch_q: list[str] = []
+            batch_p: list[str] = []
+            batch_scores: list[list[float]] = []
+            while True:
+                for item in colbert_dataset:
+                    batch_q.append(item["query"])
+                    batch_p.extend(p.get("text", "") for p in item["passages"])
+                    batch_scores.append(item["teacher_scores"])
+                    if len(batch_q) == sc["batch_size"]:
+                        yield (
+                            list(batch_q),
+                            list(batch_p),
+                            torch.tensor(batch_scores, dtype=torch.float32, device=device),
+                        )
+                        batch_q.clear(); batch_p.clear(); batch_scores.clear()
+
+        ranking_loader = _colbert_loader()
+    else:
+        base_loader = make_ranking_distill_loader(nway=nway, batch_size=sc["batch_size"])
+
+        def _simple_loader():
+            while True:
+                q_texts, p_texts = next(base_loader)
+                yield q_texts, p_texts, None
+
+        ranking_loader = _simple_loader()
+
+    optimizer = torch.optim.Adam(
+        [query_model.weight], lr=lr, weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=alignment_steps, eta_min=1e-5
+    )
+    scaler = GradScaler(enabled=fp16 and device.type == "cuda")
+
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = int(ckpt.get("step", 0))
+        print(f"[static] Resumed from {resume} at step {start_step}")
+
+    out_dir = _model_ckpt_root(sc["doc_splade_hf_id"]) / sc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    best_nanoms = float("-inf")
+    best_nanoms_path = out_dir / "best_NanoMSMARCO.pt"
+
+    if start_step == 0 and cfg.get("eval", {}).get("datasets"):
+        print("[static] Initial eval …")
+        gc.collect(); torch.cuda.empty_cache()
+        query_model.eval()
+        evaluate_asymmetric(
+            query_model, query_tokenizer, doc_splade, cfg, device,
+            writer=writer, step=0, run_doc_doc=True, override_k=0,
+            section="splade_static",
+        )
+        query_model.train()
+        gc.collect(); torch.cuda.empty_cache()
+
+    query_model.train()
+    t0 = time.time()
+    print(f"[static] Training ({alignment_steps - start_step} steps remaining) …")
+
+    for step in range(start_step, alignment_steps):
+        q_texts, p_texts, teacher_scores = next(ranking_loader)
+        B_actual = len(q_texts)
+        q_enc = query_tokenizer(
+            q_texts, max_length=sc["query_max_length"],
+            truncation=True, padding=True, return_tensors="pt",
+        )
+        a_ids  = q_enc["input_ids"].to(device)
+        a_mask = q_enc["attention_mask"].to(device)
+
+        with torch.no_grad():
+            t_q_vecs = doc_splade.encode(q_texts, sc["query_max_length"]).float()
+            if align_loss_kind in {"kd", "margin_mse"}:
+                enc_bs = sc.get("doc_enc_batch_size", sc.get("eval_batch_size", 64))
+                torch.cuda.empty_cache()  # release fragmented reserved pool before large alloc
+                p_vecs = torch.cat([
+                    doc_splade.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
+                    for i in range(0, len(p_texts), enc_bs)
+                ], dim=0)
+                p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+
+        with autocast(enabled=fp16 and device.type == "cuda"):
+            q_vecs = query_model.encode(a_ids, a_mask)
+            if align_loss_kind == "mse":
+                loss = ((q_vecs - t_q_vecs) ** 2).sum(dim=-1).mean()
+            elif align_loss_kind == "cosine":
+                loss = (1.0 - F.cosine_similarity(q_vecs.float(), t_q_vecs.float())).mean()
+            elif align_loss_kind == "kd":
+                pv3 = p_vecs_3d.to(q_vecs.dtype)
+                student_scores = (q_vecs.unsqueeze(1) * pv3).sum(-1)
+                T = kd_temperature
+                loss = F.kl_div(
+                    F.log_softmax(student_scores.float() / T, dim=-1),
+                    F.softmax(teacher_scores.float() / T, dim=-1),
+                    reduction="batchmean",
+                ) * (T * T)
+            elif align_loss_kind == "margin_mse":
+                pv3 = p_vecs_3d.to(q_vecs.dtype)
+                student_scores = (q_vecs.unsqueeze(1) * pv3).sum(-1)
+                student_margins = student_scores[:, :1] - student_scores[:, 1:]
+                teacher_margins = teacher_scores[:, :1] - teacher_scores[:, 1:]
+                loss = F.mse_loss(student_margins.float(), teacher_margins.float())
+            if lambda_q > 0.0:
+                loss = loss + lambda_q * q_vecs.sum(-1).mean()
+
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_([query_model.weight], 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+        if (step + 1) % sc["log_every"] == 0:
+            elapsed = time.time() - t0
+            with torch.no_grad():
+                q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+            lr_now = optimizer.param_groups[0]["lr"]
+            print(
+                f"[static] step {step+1:>6} | loss {loss.item():.4f} "
+                f"| q_nnz {q_nnz:.1f} | lr {lr_now:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar("static/loss", loss.item(), step + 1)
+            writer.add_scalar("static/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("static/lr", lr_now, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % sc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if cfg.get("eval", {}).get("datasets"):
+                print(f"[static] Eval at step {step+1} …")
+                gc.collect(); torch.cuda.empty_cache()
+                query_model.eval()
+                eval_results = evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="splade_static",
+                )
+                nanoms = eval_results.get("NanoMSMARCO", {}).get("query_doc")
+                if nanoms is not None and nanoms > best_nanoms:
+                    best_nanoms = nanoms
+                    torch.save(
+                        {
+                            "model": query_model.state_dict(),
+                            "step": step + 1,
+                            "best_metric": "NanoMSMARCO/query_doc_ndcg@10",
+                            "best_score": best_nanoms,
+                        },
+                        best_nanoms_path,
+                    )
+                    print(
+                        f"  New best NanoMSMARCO NDCG@10={best_nanoms:.4f} "
+                        f"→ {best_nanoms_path}"
+                    )
+                query_model.train()
+                gc.collect(); torch.cuda.empty_cache()
+
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
+    print(f"[static] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
+def train_lion_static(cfg: dict, resume: str | None = None):
+    """Zero-layer Lion sparse query encoder: one learnable weight per vocab token.
+
+    Mirrors train_splade_static but uses FrozenLionSPLADE + StaticLionQuery.
+    Reads config from the ``lion_static`` section.
+    """
+    import gc
+    import torch.nn.functional as F
+    from torch.cuda.amp import GradScaler, autocast
+    from torch.utils.tensorboard import SummaryWriter
+
+    from model import FrozenLionSPLADE, StaticLionQuery
+    from eval import evaluate_asymmetric
+    from data import make_ranking_distill_loader, ColBERTDistillationDataset, build_corpus_lookup, build_query_lookup
+
+    if "lion_static" not in cfg:
+        raise SystemExit("[lion-static] config.yaml is missing a `lion_static:` section.")
+    sc = cfg["lion_static"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    alignment_steps  = int(sc.get("alignment_steps", 10_000))
+    lr               = float(sc.get("alignment_lr", 1e-3))
+    weight_decay     = float(sc.get("weight_decay", 0.01))
+    fp16             = bool(sc.get("fp16", True))
+    lambda_q         = float(sc.get("lambda_q", 0.0))
+    align_loss_kind  = sc.get("align_loss_kind", "mse")
+    kd_temperature   = float(sc.get("kd_temperature", 1.0))
+    nway             = int(sc.get("nway", 8))
+
+    if align_loss_kind not in {"mse", "cosine", "kd", "margin_mse"}:
+        raise SystemExit(f"[lion-static] align_loss_kind must be one of: mse, cosine, kd, margin_mse.")
+
+    print(
+        f"[lion-static] lion={sc['lion_hf_id']} | steps={alignment_steps} "
+        f"| lr={lr} | lambda_q={lambda_q} | loss={align_loss_kind}"
+    )
+
+    doc_splade = FrozenLionSPLADE(sc["lion_hf_id"])
+    doc_splade.to(device).eval()
+
+    query_model = StaticLionQuery(sc["lion_hf_id"])
+    query_model.to(device)
+    query_tokenizer = query_model.tokenizer
+    print(f"[lion-static] trainable params: {query_model.trainable_param_count():,}")
+
+    if align_loss_kind in {"kd", "margin_mse"}:
+        distil_data_path  = sc.get("distil_data_path", "data/colbertv2_msmarco_64way.json")
+        corpus_dataset    = sc.get("corpus_dataset", "Tevatron/msmarco-passage-corpus")
+        corpus_text_field = sc.get("corpus_text_field", "text")
+        queries_dataset   = sc.get("queries_dataset", "Tevatron/msmarco-passage")
+        print(
+            f"[lion-static] Loading ColBERT score supervision: {distil_data_path} "
+            f"(queries={queries_dataset}, corpus={corpus_dataset})"
+        )
+        corpus = build_corpus_lookup(corpus_dataset, corpus_text_field)
+        queries = build_query_lookup(queries_dataset)
+        colbert_dataset = ColBERTDistillationDataset(distil_data_path, corpus, queries, nway=nway)
+
+        def _colbert_loader():
+            batch_q: list[str] = []
+            batch_p: list[str] = []
+            batch_scores: list[list[float]] = []
+            while True:
+                for item in colbert_dataset:
+                    batch_q.append(item["query"])
+                    batch_p.extend(p.get("text", "") for p in item["passages"])
+                    batch_scores.append(item["teacher_scores"])
+                    if len(batch_q) == sc["batch_size"]:
+                        yield (
+                            list(batch_q),
+                            list(batch_p),
+                            torch.tensor(batch_scores, dtype=torch.float32, device=device),
+                        )
+                        batch_q.clear(); batch_p.clear(); batch_scores.clear()
+
+        ranking_loader = _colbert_loader()
+    else:
+        base_loader = make_ranking_distill_loader(nway=nway, batch_size=sc["batch_size"])
+
+        def _simple_loader():
+            while True:
+                q_texts, p_texts = next(base_loader)
+                yield q_texts, p_texts, None
+
+        ranking_loader = _simple_loader()
+
+    optimizer = torch.optim.Adam(
+        [query_model.weight], lr=lr, weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=alignment_steps, eta_min=1e-5
+    )
+    scaler = GradScaler(enabled=fp16 and device.type == "cuda")
+
+    start_step = 0
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
+        query_model.load_state_dict(ckpt["model"])
+        start_step = int(ckpt.get("step", 0))
+        print(f"[lion-static] Resumed from {resume} at step {start_step}")
+
+    out_dir = Path("checkpoints_lion_static") / sc["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(out_dir / "tensorboard")
+
+    best_nanoms = float("-inf")
+    best_nanoms_path = out_dir / "best_NanoMSMARCO.pt"
+
+    if start_step == 0 and cfg.get("eval", {}).get("datasets"):
+        print("[lion-static] Initial eval …")
+        gc.collect(); torch.cuda.empty_cache()
+        query_model.eval()
+        evaluate_asymmetric(
+            query_model, query_tokenizer, doc_splade, cfg, device,
+            writer=writer, step=0, run_doc_doc=True, override_k=0,
+            section="lion_static",
+        )
+        query_model.train()
+        gc.collect(); torch.cuda.empty_cache()
+
+    query_model.train()
+    t0 = time.time()
+    print(f"[lion-static] Training ({alignment_steps - start_step} steps remaining) …")
+
+    for step in range(start_step, alignment_steps):
+        q_texts, p_texts, teacher_scores = next(ranking_loader)
+        B_actual = len(q_texts)
+        q_enc = query_tokenizer(
+            q_texts, max_length=sc["query_max_length"],
+            truncation=True, padding=True, return_tensors="pt",
+        )
+        a_ids  = q_enc["input_ids"].to(device)
+        a_mask = q_enc["attention_mask"].to(device)
+
+        with torch.no_grad():
+            t_q_vecs = doc_splade.encode(q_texts, sc["query_max_length"]).float()
+            if align_loss_kind in {"kd", "margin_mse"}:
+                enc_bs = sc.get("doc_enc_batch_size", sc.get("eval_batch_size", 64))
+                torch.cuda.empty_cache()  # release fragmented reserved pool before large alloc
+                p_vecs = torch.cat([
+                    doc_splade.encode(p_texts[i:i+enc_bs], sc["doc_max_length"]).float()
+                    for i in range(0, len(p_texts), enc_bs)
+                ], dim=0)
+                p_vecs_3d = p_vecs.view(B_actual, nway, -1)
+
+        with autocast(enabled=fp16 and device.type == "cuda"):
+            q_vecs = query_model.encode(a_ids, a_mask)
+            if align_loss_kind == "mse":
+                loss = ((q_vecs - t_q_vecs) ** 2).sum(dim=-1).mean()
+            elif align_loss_kind == "cosine":
+                loss = (1.0 - F.cosine_similarity(q_vecs.float(), t_q_vecs.float())).mean()
+            elif align_loss_kind == "kd":
+                pv3 = p_vecs_3d.to(q_vecs.dtype)
+                student_scores = (q_vecs.unsqueeze(1) * pv3).sum(-1)
+                T = kd_temperature
+                loss = F.kl_div(
+                    F.log_softmax(student_scores.float() / T, dim=-1),
+                    F.softmax(teacher_scores.float() / T, dim=-1),
+                    reduction="batchmean",
+                ) * (T * T)
+            elif align_loss_kind == "margin_mse":
+                pv3 = p_vecs_3d.to(q_vecs.dtype)
+                student_scores = (q_vecs.unsqueeze(1) * pv3).sum(-1)
+                student_margins = student_scores[:, :1] - student_scores[:, 1:]
+                teacher_margins = teacher_scores[:, :1] - teacher_scores[:, 1:]
+                loss = F.mse_loss(student_margins.float(), teacher_margins.float())
+            if lambda_q > 0.0:
+                loss = loss + lambda_q * q_vecs.sum(-1).mean()
+
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_([query_model.weight], 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+        if (step + 1) % sc["log_every"] == 0:
+            elapsed = time.time() - t0
+            with torch.no_grad():
+                q_nnz = (q_vecs.detach() > 0).float().mean(0).sum().item()
+            lr_now = optimizer.param_groups[0]["lr"]
+            print(
+                f"[lion-static] step {step+1:>6} | loss {loss.item():.4f} "
+                f"| q_nnz {q_nnz:.1f} | lr {lr_now:.2e} | {elapsed:.0f}s"
+            )
+            writer.add_scalar("lion_static/loss", loss.item(), step + 1)
+            writer.add_scalar("lion_static/q_nnz", q_nnz, step + 1)
+            writer.add_scalar("lion_static/lr", lr_now, step + 1)
+            t0 = time.time()
+
+        if (step + 1) % sc["save_every"] == 0:
+            ckpt_path = out_dir / f"align_step_{step+1}.pt"
+            torch.save({"model": query_model.state_dict(), "step": step + 1}, ckpt_path)
+            print(f"  Saved → {ckpt_path}")
+            if cfg.get("eval", {}).get("datasets"):
+                print(f"[lion-static] Eval at step {step+1} …")
+                gc.collect(); torch.cuda.empty_cache()
+                query_model.eval()
+                eval_results = evaluate_asymmetric(
+                    query_model, query_tokenizer, doc_splade, cfg, device,
+                    writer=writer, step=step + 1, run_doc_doc=False, override_k=0,
+                    section="lion_static",
+                )
+                nanoms = eval_results.get("NanoMSMARCO", {}).get("query_doc")
+                if nanoms is not None and nanoms > best_nanoms:
+                    best_nanoms = nanoms
+                    torch.save(
+                        {
+                            "model": query_model.state_dict(),
+                            "step": step + 1,
+                            "best_metric": "NanoMSMARCO/query_doc_ndcg@10",
+                            "best_score": best_nanoms,
+                        },
+                        best_nanoms_path,
+                    )
+                    print(
+                        f"  New best NanoMSMARCO NDCG@10={best_nanoms:.4f} "
+                        f"→ {best_nanoms_path}"
+                    )
+                query_model.train()
+                gc.collect(); torch.cuda.empty_cache()
+
+    final_path = out_dir / "align_final.pt"
+    torch.save({"model": query_model.state_dict(), "step": alignment_steps}, final_path)
+    print(f"[lion-static] Done. Final checkpoint → {final_path}")
+    writer.close()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Train SAE-SPLADE with ettin-17m")
+    parser = argparse.ArgumentParser(description="Train shallow SPLADE-compatible query encoders")
     parser.add_argument(
         "stage",
-        choices=[
-            "sae", "splade", "asymmetric", "projected",
-            "vocab_transplant", "vocab_transplant_align", "lion_transplant_align",
-            "random_init_align", "doc_head_align", "direct_align",
-            "splade_shallow_align", "splade_shallow_factorized_align",
-            "splade_shallow_factorized_spaced_align",
-            "splade_shallow_align_distill", "lion_shallow_align",
-            "lion_shallow_align_4l",
-            "lion_shallow_factorized_align",
-            "lion_shallow_factorized_align_3l",
-            "lion_shallow_factorized_align_4l",
-            "lion_shallow_factorized_spaced_align",
-            "lion_shallow_factorized_cosine_align",
-            "lion_shallow_factorized_spaced_contrastive_align",
-            "lion_shallow_spaced_align",
-        ],
+        choices=["splade_shallow", "lion_shallow", "splade_static", "lion_static"],
         help="Training stage to run.",
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
@@ -3544,53 +4121,14 @@ def main():
 
     cfg = load_config(args.config)
 
-    if args.stage == "sae":
-        train_sae(cfg, resume=args.resume)
-    elif args.stage == "splade":
-        cfg["splade"]["_sae_cfg"] = cfg["sae"]
-        train_splade(cfg, resume=args.resume)
-    elif args.stage == "asymmetric":
-        train_asymmetric(cfg, resume=args.resume)
-    elif args.stage == "projected":
-        train_projected(cfg, resume=args.resume)
-    elif args.stage == "vocab_transplant_align":
-        train_vocab_transplant_align(cfg, resume=args.resume)
-    elif args.stage == "lion_transplant_align":
-        train_lion_transplant_align(cfg, resume=args.resume)
-    elif args.stage == "random_init_align":
-        train_random_init_align(cfg, resume=args.resume)
-    elif args.stage == "doc_head_align":
-        train_doc_head_align(cfg, resume=args.resume)
-    elif args.stage == "direct_align":
-        train_direct_align(cfg, resume=args.resume)
-    elif args.stage == "splade_shallow_align":
+    if args.stage == "splade_shallow":
         train_splade_shallow_align(cfg, resume=args.resume, init_from=args.init_from)
-    elif args.stage == "splade_shallow_factorized_align":
-        train_splade_shallow_factorized_align(cfg, resume=args.resume, init_from=args.init_from)
-    elif args.stage == "splade_shallow_factorized_spaced_align":
-        train_splade_shallow_factorized_spaced_align(cfg, resume=args.resume, init_from=args.init_from)
-    elif args.stage == "splade_shallow_align_distill":
-        train_splade_shallow_align_distill(cfg, resume=args.resume, init_from=args.init_from)
-    elif args.stage == "lion_shallow_align":
+    elif args.stage == "lion_shallow":
         train_lion_shallow_align(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_factorized_align":
-        train_lion_shallow_factorized_align(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_factorized_align_3l":
-        train_lion_shallow_factorized_align_3l(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_align_4l":
-        train_lion_shallow_align_4l(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_factorized_align_4l":
-        train_lion_shallow_factorized_align_4l(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_factorized_spaced_align":
-        train_lion_shallow_factorized_spaced_align(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_factorized_cosine_align":
-        train_lion_shallow_factorized_cosine_align(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_factorized_spaced_contrastive_align":
-        train_lion_shallow_factorized_spaced_contrastive_align(cfg, resume=args.resume)
-    elif args.stage == "lion_shallow_spaced_align":
-        train_lion_shallow_spaced_align(cfg, resume=args.resume)
-    else:
-        train_vocab_transplant(cfg, resume=args.resume)
+    elif args.stage == "splade_static":
+        train_splade_static(cfg, resume=args.resume)
+    elif args.stage == "lion_static":
+        train_lion_static(cfg, resume=args.resume)
 
 
 if __name__ == "__main__":
