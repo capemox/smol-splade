@@ -96,3 +96,19 @@ Build indexes for the frozen document encoder selected by the stage:
 uv run scripts/build_beir_index.py --stage splade_shallow
 uv run scripts/build_msmarco_index.py --stage splade_shallow
 ```
+
+## CoCondenser VM Experiment
+
+The complete 15-run pruning experiment for
+`naver/splade-cocondenser-ensembledistil` has a resumable one-command launcher:
+
+```bash
+./run_cocondenser_vm.sh
+```
+
+Run it inside `tmux` on a CUDA VM with at least 200 GiB of free disk. It builds
+one shared MS MARCO index, trains first/spaced/last 1-5 layer query encoders for
+30,000 steps with MSE and effective batch size 32, selects one winner per depth
+on MS MARCO dev NDCG@10, builds one shared set of 13 BEIR indexes, and evaluates
+the five winners plus the full model. Re-running the command resumes or skips
+completed work. Results are written to `results/cocondenser_vm.md`.

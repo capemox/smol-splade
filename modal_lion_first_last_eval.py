@@ -162,6 +162,8 @@ def _write_variant_config(variant: dict) -> str:
     sc["factorize_embeddings"] = False
     sc["freeze_head_after_warmup"] = True
     sc["output_dir"] = variant["output_dir"]
+    if variant["name"].startswith("last"):
+        sc["alignment_steps"] = 30_000
     base["lion_shallow"] = sc
     cfg_path = f"{WORK_DIR}/{LOGS_DIR}/config_{variant['name']}.yaml"
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)

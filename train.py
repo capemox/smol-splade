@@ -2727,6 +2727,10 @@ def train_splade_shallow_align(
     optimizer.zero_grad()
     best_nanoms = float("-inf")
     best_nanoms_path = out_dir / "best_NanoMSMARCO.pt"
+    if resume and best_nanoms_path.exists():
+        previous_best = torch.load(best_nanoms_path, map_location="cpu")
+        best_nanoms = float(previous_best.get("best_score", best_nanoms))
+        print(f"[shallow] Preserving previous best NanoMSMARCO NDCG@10={best_nanoms:.4f}")
 
     for step in range(start_step, alignment_steps):
         # ── Phase boundary: unfreeze everything ───────────────────────
